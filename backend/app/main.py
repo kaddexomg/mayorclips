@@ -3,6 +3,7 @@ import sys
 import json
 import html
 import secrets
+import hashlib
 import asyncio
 import shutil
 from datetime import datetime, timezone, timedelta
@@ -711,6 +712,36 @@ async def oauth_meta_callback(code: Optional[str] = None, error: Optional[str] =
         return _oauth_popup_html(False, "meta", "Error conectando Meta", str(exc))
 
 
+# --- TikTok PKCE (obligatorio para la plataforma "Desktop" de TikTok) ---
+# El verificador vive solo en memoria: el flujo start -> callback dura segundos y
+# el backend corre en un único worker (ver INICIAR-MAYORCLIPS.bat).
+_TIKTOK_PKCE_TTL_SECONDS = 600
+_tiktok_pkce: Dict[str, Any] = {}
+
+
+def _tiktok_is_loopback_redirect(redirect_uri: str) -> bool:
+    return redirect_uri.startswith(("http://127.0.0.1", "http://localhost", "https://127.0.0.1", "https://localhost"))
+
+
+def _tiktok_pkce_store(state: str, verifier: str) -> None:
+    now = datetime.now(timezone.utc)
+    for key, item in list(_tiktok_pkce.items()):
+        if (now - item["created_at"]).total_seconds() > _TIKTOK_PKCE_TTL_SECONDS:
+            _tiktok_pkce.pop(key, None)
+    _tiktok_pkce[state] = {"verifier": verifier, "created_at": now}
+
+
+def _tiktok_pkce_take(state: Optional[str]) -> Optional[str]:
+    if not state:
+        return None
+    item = _tiktok_pkce.pop(state, None)
+    if not item:
+        return None
+    if (datetime.now(timezone.utc) - item["created_at"]).total_seconds() > _TIKTOK_PKCE_TTL_SECONDS:
+        return None
+    return item["verifier"]
+
+
 @app.get("/oauth/tiktok/start")
 def oauth_tiktok_start(session: Session = Depends(get_session)):
     c = _get_oauth_creds(session)
@@ -719,24 +750,35 @@ def oauth_tiktok_start(session: Session = Depends(get_session)):
             status_code=400,
             detail="Configura primero TikTok Client Key y Client Secret en la Bóveda de Credenciales o usa Modo Token Directo.",
         )
-    params = urlencode({
+    state = secrets.token_urlsafe(16)
+    params = {
         "client_key": c["tiktok_client_key"],
         "response_type": "code",
         "scope": "user.info.basic,video.upload",
         "redirect_uri": c["tiktok_redirect_uri"],
-        "state": secrets.token_urlsafe(12),
-    })
-    return {"auth_url": f"https://www.tiktok.com/v2/auth/authorize/?{params}"}
+        "state": state,
+    }
+    # TikTok exige PKCE (S256) cuando la app está registrada como plataforma Desktop,
+    # y Desktop exige que el redirect_uri sea loopback (127.0.0.1 / localhost).
+    if _tiktok_is_loopback_redirect(c["tiktok_redirect_uri"]):
+        code_verifier = secrets.token_urlsafe(64)
+        code_challenge = hashlib.sha256(code_verifier.encode("ascii")).hexdigest()
+        _tiktok_pkce_store(state, code_verifier)
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
+    return {"auth_url": f"https://www.tiktok.com/v2/auth/authorize/?{urlencode(params)}"}
 
 
 @app.get("/oauth/tiktok/callback")
-async def oauth_tiktok_callback(code: Optional[str] = None, error: Optional[str] = None, session: Session = Depends(get_session)):
+async def oauth_tiktok_callback(code: Optional[str] = None, error: Optional[str] = None, state: Optional[str] = None, session: Session = Depends(get_session)):
     if error or not code:
         return _oauth_popup_html(False, "tiktok", "Autorización TikTok cancelada", error or "No se recibió el código OAuth de TikTok.")
     c = _get_oauth_creds(session)
     try:
+        code_verifier = _tiktok_pkce_take(state)
         tok_data = await tiktok_publisher.exchange_code(
-            c["tiktok_client_key"], c["tiktok_client_secret"], code, c["tiktok_redirect_uri"]
+            c["tiktok_client_key"], c["tiktok_client_secret"], code, c["tiktok_redirect_uri"],
+            code_verifier=code_verifier,
         )
         access_token = tok_data["access_token"]
         refresh_token = tok_data.get("refresh_token")
