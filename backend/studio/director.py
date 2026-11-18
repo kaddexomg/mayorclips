@@ -3,7 +3,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from pulpo.gemini_pool import gemini_pool
-from pulpo.tts import VOICES
+from pulpo.tts import VOICES, sanitize_tts_text
 
 VALID_VOICES = list(VOICES.keys())
 
@@ -195,7 +195,7 @@ def _normalize_beat(
     for d_idx, d in enumerate(raw.get("dialogues") or []):
         if not isinstance(d, dict):
             continue
-        txt = str(d.get("text") or "").strip()
+        txt = sanitize_tts_text(str(d.get("text") or ""))
         if not txt:
             continue
         sp_id = str(d.get("speaker_id") or "")
@@ -209,6 +209,18 @@ def _normalize_beat(
             "accent_color": sp.get("accent_color", "#2BF0C8"),
             "voice": sp["voice"],
             "text": txt,
+        })
+
+    if not dlgs_out:
+        sp = characters[idx % len(characters)]
+        fallback_txt = sanitize_tts_text(str(raw.get("headline") or "")) or sanitize_tts_text(topic) or f"Escena {idx + 1}"
+        dlgs_out.append({
+            "speaker_id": sp["id"],
+            "speaker_name": sp["name"],
+            "archetype": sp.get("archetype", "analyst"),
+            "accent_color": sp.get("accent_color", "#2BF0C8"),
+            "voice": sp["voice"],
+            "text": fallback_txt,
         })
 
     accent = str(raw.get("accent_color") or "").strip()

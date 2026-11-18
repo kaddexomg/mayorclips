@@ -479,7 +479,7 @@ Devuelve un JSON dict EXACTO con:
     "id": "c1" | "c2" | "c3",
     "name": string corto (ej. "Ciudadano", "Analista", "Poder", "Jugador", "Dev"),
     "archetype": "citizen" | "analyst" | "authority" | "gamer" | "reporter" | "developer",
-    "voice": uno distinto por personaje entre ["es-AR-TomasNeural", "es-MX-JorgeNeural", "es-MX-DaliaNeural", "es-ES-AlvaroNeural", "es-CO-GonzaloNeural", "es-ES-ElviraNeural"],
+    "voice": uno distinto por personaje entre ["es-CO-GonzaloNeural", "es-MX-JorgeNeural", "es-MX-DaliaNeural", "es-ES-AlvaroNeural", "es-ES-ElviraNeural", "es-AR-TomasNeural"],
     "accent_color": hex vibrante (ej. "#38BDF8", "#2BF0C8", "#EF4444", "#F59E0B", "#A855F7")
   }}
 - "scenes": lista de 3 a 4 escenas secuenciales con:

@@ -9,7 +9,7 @@ from sqlmodel import Session
 from app.config import BASE_DIR, CACHE_DIR, FFMPEG_PATH, MEDIA_DIR, RENDERS_DIR
 from app.db import engine
 from app.models import StudioVideo
-from pulpo.tts import VOICES, generate_speech_with_timestamps
+from pulpo.tts import VOICES, generate_speech_with_timestamps, sanitize_tts_text
 from render.subtitles import generate_ass_file
 from studio.director import enhance_studio_storyboard
 from studio.media_fetcher import prefetch_storyboard_media
@@ -91,16 +91,23 @@ async def render_studio_video_job(job_id: str, studio_id: str, progress_callback
         for t_idx, dlg in enumerate(dlgs):
             turn_jobs.append((b_idx, t_idx, dlg))
 
-    tts_sem = asyncio.Semaphore(3)
+    tts_sem = asyncio.Semaphore(2)
     temp_audio_files: List[str] = []
 
     async def _gen_turn(b_idx: int, t_idx: int, dlg: Dict[str, Any]):
         fname = f"studio_{studio_id[:8]}_b{b_idx}_t{t_idx}_{uuid.uuid4().hex[:4]}.mp3"
         voice = dlg.get("voice") if dlg.get("voice") in VOICES else FALLBACK_VOICES[0]
+        spoken_text = (
+            sanitize_tts_text(dlg.get("text") or "")
+            or sanitize_tts_text(beats[b_idx].get("headline") or "")
+            or sanitize_tts_text(final_title)
+            or "Siguiente escena."
+        )
+        dlg["text"] = spoken_text
         async with tts_sem:
-            res = await generate_speech_with_timestamps(dlg["text"], voice=voice, output_filename=fname)
+            res = await generate_speech_with_timestamps(spoken_text, voice=voice, output_filename=fname)
         dur = float(res.get("duration_sec") or 0.0)
-        probed = _probe_audio_duration(res["audio_path"], fallback=max(1.4, len(dlg["text"].split()) * 0.42))
+        probed = _probe_audio_duration(res["audio_path"], fallback=max(1.4, len(spoken_text.split()) * 0.42))
         dur = max(dur, probed)
         temp_audio_files.append(res["audio_path"])
         return b_idx, t_idx, dlg, res, dur
