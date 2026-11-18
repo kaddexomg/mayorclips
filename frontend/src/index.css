@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-abyss text-text-main font-sans;
+    background-image: 
+      radial-gradient(circle at 50% 0%, rgba(43, 240, 200, 0.08) 0%, transparent 45%),
+      radial-gradient(circle at 100% 50%, rgba(20, 36, 43, 0.6) 0%, transparent 50%);
+    background-attachment: fixed;
+  }
+}
+
+/* Custom modern scrollbar matching Quanty theme */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #060B10;
+}
+::-webkit-scrollbar-thumb {
+  background: #14242B;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2BF0C8;
+}

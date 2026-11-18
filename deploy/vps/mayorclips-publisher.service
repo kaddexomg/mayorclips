@@ -1,0 +1,21 @@
+[Unit]
+Description=MayorClips 24/7 Multi-Network Publisher & Stats Daemon
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/mayorclips/publisher
+ExecStart=/usr/bin/python3 -m uvicorn app:app --host 0.0.0.0 --port 8010
+Restart=always
+RestartSec=5
+
+# Límites estrictos de protección para el VPS de JJ Paper
+MemoryMax=400M
+CPUQuota=50%
+
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/mayorclips/.env
+
+[Install]
+WantedBy=multi-user.target

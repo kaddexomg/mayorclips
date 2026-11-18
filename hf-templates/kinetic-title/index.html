@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #060B10;
+      color: #E8F6F2;
+      font-family: 'Sora', sans-serif;
+      width: 1080px;
+      height: 1920px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .clip {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 80px;
+      text-align: center;
+    }
+    .badge {
+      font-family: monospace;
+      text-transform: uppercase;
+      font-size: 28px;
+      color: #2BF0C8;
+      background: rgba(43, 240, 200, 0.1);
+      border: 2px solid rgba(43, 240, 200, 0.3);
+      padding: 12px 28px;
+      border-radius: 999px;
+      margin-bottom: 40px;
+    }
+    .title {
+      font-size: 92px;
+      font-weight: 800;
+      line-height: 1.1;
+      letter-spacing: -2px;
+    }
+    .title span {
+      color: #2BF0C8;
+    }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+</head>
+<body>
+  <div class="clip" data-start="0" data-duration="5" id="scene1">
+    <div class="badge" id="badge">● DATO VIRAL</div>
+    <h1 class="title" id="title" data-var-text="title">¿SABÍAS <span>ESTO</span>?</h1>
+  </div>
+
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+
+    tl.from("#badge", { opacity: 0, y: -40, duration: 0.6, ease: "power3.out" })
+      .from("#title", { opacity: 0, scale: 0.85, duration: 0.8, ease: "back.out(1.7)" }, "-=0.3");
+
+    window.__timelines["main"] = tl;
+  </script>
+</body>
+</html>
