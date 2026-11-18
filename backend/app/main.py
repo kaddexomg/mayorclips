@@ -78,6 +78,8 @@ app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 async def on_startup():
     init_db()
     set_main_loop(asyncio.get_running_loop())
+    from clipper.transcriber import preload_whisper_model
+    asyncio.create_task(asyncio.to_thread(preload_whisper_model))
 
 
 def _clip_with_urls(clip: Clip) -> Dict[str, Any]:
@@ -249,7 +251,7 @@ class CreateClipPayload(BaseModel):
     event_comment: Optional[str] = None
     start_sec: float
     end_sec: float
-    layout: Optional[str] = "split_screen"
+    layout: Optional[str] = "auto"
     subtitle_style: Optional[str] = "hormozi"
 
 
@@ -265,7 +267,7 @@ def create_clip(payload: CreateClipPayload, session: Session = Depends(get_sessi
         start_sec=payload.start_sec,
         end_sec=payload.end_sec,
         duration_sec=dur,
-        layout=payload.layout or "split_screen",
+        layout=payload.layout or "auto",
         subtitle_style=payload.subtitle_style or "hormozi",
         status="draft",
     )

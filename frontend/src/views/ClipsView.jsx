@@ -66,6 +66,20 @@ export default function ClipsView({ selectedProject, setTab, onSelectClipForPubl
     loadData();
   }, [activeProject]);
 
+  // Auto-refresh whenever any clip in list is actively rendering in backend
+  useEffect(() => {
+    const hasActiveRender = clips.some((c) => c.status === "rendering");
+    if (!hasActiveRender) return;
+    const t = setInterval(async () => {
+      try {
+        const pid = activeProject?.id;
+        const fresh = await api.listClips(pid || undefined);
+        setClips(fresh);
+      } catch (_) {}
+    }, 2500);
+    return () => clearInterval(t);
+  }, [clips, activeProject]);
+
   const trackRenderJob = (jobId, clipId) => {
     const interval = setInterval(async () => {
       try {
@@ -99,7 +113,7 @@ export default function ClipsView({ selectedProject, setTab, onSelectClipForPubl
         event_comment: customOverrides?.event_comment ?? moment.event_comment,
         start_sec: customOverrides?.start_sec ?? moment.start_sec,
         end_sec: customOverrides?.end_sec ?? moment.end_sec,
-        layout: customOverrides?.layout ?? "split_screen",
+        layout: customOverrides?.layout ?? "auto",
         subtitle_style: customOverrides?.subtitle_style ?? "hormozi",
       });
 
@@ -461,9 +475,12 @@ export default function ClipsView({ selectedProject, setTab, onSelectClipForPubl
                   onChange={(e) => setEditLayout(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg bg-abyss border border-white/10 text-white focus:outline-none focus:border-brand"
                 >
-                  <option value="split_screen">Split Screen (Cámara arriba + Pantalla abajo)</option>
+                  <option value="auto">Auto Inteligente (Detecta hablantes y pantalla)</option>
+                  <option value="duo_split">Dúo Vertical (1 persona arriba / 1 persona abajo)</option>
+                  <option value="speaker_focus">Seguimiento al Hablante Activo + Pantalla</option>
+                  <option value="split_screen">Webcam Arriba + Juego/Pantalla Abajo</option>
                   <option value="centered_face">Centrado en Hablante (9:16 Full)</option>
-                  <option value="blur_bg">Pantalla Completa + Fondo Desenfoque</option>
+                  <option value="blur_bg">Pantalla Completa + Fondo Blur</option>
                 </select>
               </div>
 

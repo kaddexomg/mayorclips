@@ -11,8 +11,9 @@ from app.models import Project, Moment, Clip, Transcript
 from app.config import MEDIA_DIR, CACHE_DIR, RENDERS_DIR, FFMPEG_PATH
 from ingest import ingester, analyze_audio_peaks, scan_kick_chat_peaks
 from pulpo import pulpo
-from render import generate_ass_file, render_vertical_clip, extract_frame_jpeg
-from clipper.transcriber import transcribe_clip_words
+from render import generate_ass_file, render_vertical_clip, extract_frame_jpeg, render_pill_overlay_png
+from clipper.transcriber import transcribe_clip_words, polish_words_with_pulpo
+from clipper.face_tracker import analyze_speakers_and_motion
 
 
 def _probe_local_duration(video_path: str) -> float:
@@ -337,6 +338,9 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
     temp_slice_created = False
     frame_jpg = str(CACHE_DIR / f"frame_{clip_id[:8]}.jpg")
     ass_path = str(CACHE_DIR / f"subs_{clip_id[:8]}.ass")
+    hook_png_path = str(CACHE_DIR / f"hook_{clip_id[:8]}.png")
+    card_png_path = str(CACHE_DIR / f"card_{clip_id[:8]}.png")
+    stream_title = proj.title or ""
 
     try:
         if source_type == "file" and local_video and Path(local_video).exists():
@@ -364,33 +368,70 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
             )
             temp_slice_created = True
 
-        # 2. Gemini Vision facecam detection on 1 frame
+        # 2. Gemini Vision scene classification + OpenCV YuNet active-speaker tracking
         if progress_callback:
-            progress_callback(42, "Detectando encuadre y posición de cámara con IA...")
+            progress_callback(40, "Analizando rostros y seguimiento de hablante activo...")
         webcam_box = None
+        vision = {}
         extracted_jpg = await asyncio.to_thread(extract_frame_jpeg, slice_path, frame_jpg, min(2.0, duration / 2))
         if extracted_jpg:
             vision = await pulpo.run("detect_facecam", {"image_path": extracted_jpg})
             webcam_box = vision.get("webcam_box")
-            if layout == "split_screen" and vision.get("has_facecam") is False:
-                # Auto-adapt only if there is genuinely no facecam overlay on screen
+
+        track_data = await asyncio.to_thread(analyze_speakers_and_motion, slice_path, 3.0)
+        speakers = track_data.get("speakers", [])
+        timeline_segments = track_data.get("timeline_segments", [])
+
+        # Resolve intelligent layout if auto or legacy split_screen fallback
+        if layout in ("auto", "", None):
+            if vision.get("has_important_bottom_graphic") and len(speakers) >= 2:
+                layout = "speaker_focus"
+            elif vision.get("scene_type") == "two_person_split" and len(speakers) >= 2:
+                layout = "duo_split"
+            elif vision.get("has_facecam") and vision.get("scene_type") == "facecam_gameplay":
+                layout = "split_screen"
+            elif len(speakers) >= 2 and vision.get("scene_type") == "multi_panel":
+                layout = "speaker_focus"
+            else:
+                layout = vision.get("layout_recommended") or track_data.get("recommended_layout") or "blur_bg"
+        elif layout == "split_screen" and vision.get("has_facecam") is False:
+            if len(speakers) == 2 and not vision.get("has_important_bottom_graphic"):
+                layout = "duo_split"
+            elif len(speakers) >= 2:
+                layout = "speaker_focus"
+            else:
                 layout = vision.get("layout_recommended", "blur_bg")
 
-        # 3. Real local faster-whisper word-level transcription
+        # 3. Whisper base transcription + Gemini LATAM slang polishing
         if progress_callback:
-            progress_callback(58, "Transcribiendo audio real palabra por palabra (Whisper local)...")
+            progress_callback(56, "Transcribiendo audio con Whisper Base y corrigiendo jerga...")
         words = await asyncio.to_thread(transcribe_clip_words, slice_path, "es")
-        if not words:
-            # Fallback if segment is purely instrumental/non-speech
+        if words:
+            words = await polish_words_with_pulpo(words, context=f"{stream_title} | {clip.title}")
+        else:
             words = [{"word": w, "start_sec": round(i * 0.4, 2), "end_sec": round((i + 1) * 0.4, 2)} for i, w in enumerate(hook_text.split()[:6])]
 
+        # Place subtitles cleanly in safe zone depending on layout
+        margin_v = 920 if layout in ("duo_split", "speaker_focus") else (340 if layout == "centered_face" else 440)
         await asyncio.to_thread(
-            generate_ass_file, words, ass_path, style_name=sub_style, title_hook=hook_text, event_comment=event_comment
+            generate_ass_file, words, ass_path, style_name=sub_style, margin_v_override=margin_v
         )
 
-        # 4. Hardware-accelerated render
+        # 4. Graphic PNG overlays with full-color emojis (no ugly [brackets]!)
+        title_y = 125 if layout in ("duo_split", "speaker_focus") else 210
+        hook_png = await asyncio.to_thread(
+            render_pill_overlay_png, hook_text, hook_png_path, y_center=title_y, font_size=44
+        )
+        card_png = None
+        if event_comment and event_comment.strip() and event_comment.strip().lower() != hook_text.strip().lower():
+            card_png = await asyncio.to_thread(
+                render_pill_overlay_png, event_comment, card_png_path, y_center=title_y, font_size=36,
+                bg_rgba=(20, 36, 43, 230), border_rgba=(255, 255, 255, 80)
+            )
+
+        # 5. Hardware-accelerated render + subtle SFX
         if progress_callback:
-            progress_callback(78, "Renderizando vertical 9:16 con subtítulos y AMD AMF...")
+            progress_callback(78, f"Renderizando 9:16 ({layout}) con subtítulos y SFX...")
         out_mp4 = f"clip_{clip_id[:8]}_vertical.mp4"
         render_res = await asyncio.to_thread(
             render_vertical_clip,
@@ -401,6 +442,11 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
             duration,
             ass_path,
             webcam_box,
+            speakers,
+            timeline_segments,
+            hook_png,
+            card_png,
+            True,
         )
 
         with Session(engine) as session:
@@ -433,7 +479,7 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
                 session.commit()
         raise
     finally:
-        for tmp in [frame_jpg, ass_path]:
+        for tmp in [frame_jpg, ass_path, hook_png_path, card_png_path]:
             if tmp and Path(tmp).exists():
                 try:
                     Path(tmp).unlink()

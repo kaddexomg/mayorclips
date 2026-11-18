@@ -243,6 +243,43 @@ export default function AccountsView() {
           </form>
         </div>
       </div>
+
+      {/* Interactive Setup Guide */}
+      <div className="glass-panel rounded-2xl p-6 space-y-5">
+        <h3 className="font-display font-bold text-base text-white">
+          Guía Rápida Paso a Paso para Vincular tus Cuentas (100% Gratis)
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs text-neutral-300">
+          <div className="p-4 rounded-xl bg-abyss/70 border border-white/5 space-y-2">
+            <div className="font-bold text-blue-400">1. Facebook e Instagram (Meta)</div>
+            <ol className="list-decimal list-inside space-y-1.5 text-[11px] text-neutral-400 leading-relaxed">
+              <li>Cambia tu Instagram a cuenta <strong>Profesional (Creador/Empresa)</strong> y vincúlala a una <strong>Página de Facebook</strong>.</li>
+              <li>Entra a <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noreferrer" className="text-brand underline">Meta Graph API Explorer</a>.</li>
+              <li>Marca los permisos: <code className="text-white">pages_show_list</code>, <code className="text-white">pages_manage_posts</code>, <code className="text-white">instagram_basic</code>, <code className="text-white">instagram_content_publish</code>.</li>
+              <li>Genera el Token, pégalo arriba y MayorClips detectará tus páginas y tu IG automáticamente.</li>
+            </ol>
+          </div>
+
+          <div className="p-4 rounded-xl bg-abyss/70 border border-white/5 space-y-2">
+            <div className="font-bold text-brand">2. TikTok (Inbox 1-Tap Público)</div>
+            <ol className="list-decimal list-inside space-y-1.5 text-[11px] text-neutral-400 leading-relaxed">
+              <li>Crea una app gratuita en <a href="https://developers.tiktok.com/" target="_blank" rel="noreferrer" className="text-brand underline">TikTok for Developers</a>.</li>
+              <li>Activa los productos <strong>Login Kit</strong> y <strong>Content Posting API</strong> (permiso <code className="text-white">video.upload</code>).</li>
+              <li>Conecta tu cuenta de TikTok como Tester en Sandbox y pega tu <code className="text-white">Access Token</code> arriba.</li>
+              <li>Cada clip llegará a tu app para publicarse en público con 1 toque sin bloqueos privados.</li>
+            </ol>
+          </div>
+
+          <div className="p-4 rounded-xl bg-abyss/70 border border-white/5 space-y-2">
+            <div className="font-bold text-red-400">3. YouTube Shorts (Google)</div>
+            <ol className="list-decimal list-inside space-y-1.5 text-[11px] text-neutral-400 leading-relaxed">
+              <li>Tu proyecto ya tiene el <code className="text-white">GOOGLE_CLIENT_ID</code> conectado en <code className="text-white">.env</code>.</li>
+              <li>Activa <strong>YouTube Data API v3</strong> en tu Google Cloud Console de JJ Paper.</li>
+              <li>Nota: las apps nuevas en modo prueba suben en privado hasta enviar la verificación gratuita de Google.</li>
+            </ol>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

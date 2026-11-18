@@ -9,7 +9,6 @@ from pulpo.tts import generate_speech_with_timestamps
 
 
 def _compute_hash(task: str, payload: Any) -> str:
-    # Avoid hashing huge raw base64 blobs repeatedly if audio_path is given
     safe_payload = dict(payload) if isinstance(payload, dict) else payload
     raw = f"{task}:{json.dumps(safe_payload, sort_keys=True, default=str)}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -40,7 +39,7 @@ class PulpoRouter:
 
     async def run(self, task: str, payload: Dict[str, Any], use_cache: bool = True) -> Any:
         h = _compute_hash(task, payload)
-        if use_cache and task not in ("analyze_audio_window", "detect_facecam"):
+        if use_cache and task not in ("analyze_audio_window", "detect_facecam", "polish_transcript"):
             cached = _get_cache(h)
             if cached is not None:
                 return cached
@@ -50,6 +49,8 @@ class PulpoRouter:
             res = await self._analyze_audio_window(payload)
         elif task == "detect_facecam":
             res = await self._detect_facecam(payload)
+        elif task == "polish_transcript":
+            res = await self._polish_transcript(payload)
         elif task == "find_moments":
             res = await self._find_moments(payload)
         elif task == "write_titles":
@@ -65,7 +66,7 @@ class PulpoRouter:
         else:
             raise ValueError(f"Tarea de Pulpo desconocida: {task}")
 
-        if use_cache and res is not None and task not in ("analyze_audio_window", "detect_facecam"):
+        if use_cache and res is not None and task not in ("analyze_audio_window", "detect_facecam", "polish_transcript"):
             _set_cache(h, res)
         return res
 
@@ -85,32 +86,35 @@ class PulpoRouter:
         mime_type = "audio/aac" if ext in (".m4a", ".aac") else "audio/mp3"
 
         system_instruction = (
-            "Eres un productor experto de clips virales (TikTok, Instagram Reels, YouTube Shorts). "
-            "Escuchas fragmentos reales de audio de transmisiones en español e identificas los mejores cortes virales. "
+            "Eres un editor profesional de clips cortos en español para redes (TikTok, Instagram Reels, Shorts). "
+            "Escribes títulos limpios, naturales y atractivos, sin gritar todo en mayúsculas ni usar clickbait sucio. "
+            "Solo usas 1 emoji ocasionalmente si aporta emoción natural; muchos títulos funcionan mejor sin emoji. "
             "Responde SIEMPRE en español y estrictamente en formato JSON válido."
         )
 
         prompt = f"""
 Stream: "{title}" — Creador: {streamer}
-Este audio dura {window_dur_sec:.0f} segundos (el segundo 0.0 de este audio corresponde al segundo {window_start_sec:.0f} del stream completo).
-Mensajes reales del chat en este momento: {chat_sample}
+Este fragmento dura {window_dur_sec:.0f} segundos (el segundo 0.0 del audio corresponde al segundo {window_start_sec:.0f} del stream completo).
+Mensajes del chat en este tramo: {chat_sample}
 
-Escucha con atención el audio completo:
-1. Evalúa si hay un momento gracioso, polémico, emotivo, grito, remate o discusión interesante digna de clip.
-2. Si lo hay, define el corte exacto dentro de este audio (`start_offset_sec` entre 0 y {window_dur_sec:.0f}, y `end_offset_sec` de 15 a 75 segundos después).
-3. Transcribe brevemente las frases clave que realmente se escuchan.
+Escucha el audio real con atención:
+1. Identifica el momento de mayor interés o gracia y define el corte exacto en una pausa o inicio claro de frase (`start_offset_sec` y `end_offset_sec`, duración entre 20 y 65 segundos).
+2. Redacta un título editorial limpio (sin todo en mayúsculas ni signos repetidos como `!!!`, y con máximo 1 emoji SOLO si realmente encaja; déjalo sin emoji si se lee más elegante).
+3. Redacta un gancho corto de pantalla (`hook`, máximo 5 palabras claras).
+4. En `reason`, explica en 2 frases claras y con sentido **quién habla, qué está pasando y por qué vale la pena el clip** para alguien que no vio el directo.
+5. En `event_comment`, escribe un apunte breve y natural de contexto (sin corchetes ni barras raras).
 
 Devuelve un JSON dict exacto con:
 - "is_viral_worthy": boolean
 - "start_offset_sec": float
 - "end_offset_sec": float
-- "title": string (título llamativo en español de máximo 60 caracteres)
-- "hook": string (texto gancho en pantalla para los primeros 2 segundos, en español y mayúsculas cortas)
-- "reason": string (explicación breve de qué ocurre exactamente en el audio)
-- "virality_score": int (0 a 99; >=80 solo si de verdad hay acción/emoción/chiste claro)
-- "event_comment": string (tarjeta de comentario divertida con 1 emoji, ej: '💀 Se calentó la discusión en vivo')
+- "title": string (máximo 52 caracteres, ortografía natural en español)
+- "hook": string (3 a 5 palabras claras para el encabezado en pantalla)
+- "reason": string (explicación coherente y completa del contexto del clip)
+- "virality_score": int (60 a 99)
+- "event_comment": string (comentario corto de contexto sin corchetes, opcionalmente 1 emoji si aporta)
 - "tags": list de strings
-- "transcript_summary": string (lo que dicen textualmente)
+- "transcript_summary": string (resumen fiel de lo que se escucha)
 """
         media_parts = [{"inlineData": {"mimeType": mime_type, "data": b64_audio}}]
         res = await gemini_pool.generate_json(
@@ -120,26 +124,56 @@ Devuelve un JSON dict exacto con:
             return res[0]
         return res
 
+    async def _polish_transcript(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Fixes proper nouns and LATAM/gaming slang in Whisper word tokens while preserving exact timestamps."""
+        words = payload.get("words", [])
+        context_hint = payload.get("context", "")
+        if not words:
+            return {"replacements": {}}
+
+        indexed = [{"i": idx, "w": w["word"]} for idx, w in enumerate(words[:180])]
+        system_instruction = (
+            "Eres corrector ortográfico de subtítulos en español rioplatense/latinoamericano. "
+            "Corrige únicamente palabras mal transcritas fonéticamente (nombres propios, jerga de fútbol/streaming, palabras repetidas sin sentido). "
+            "No inventes frases nuevas ni cambies los índices."
+        )
+        prompt = f"""
+Contexto del stream: {context_hint}
+Palabras detectadas con índice:
+{json.dumps(indexed, ensure_ascii=False)}
+
+Devuelve un JSON dict con la clave "replacements", donde cada entrada sea el índice en string y la palabra corregida:
+Ejemplo: {{"14": "estadísticas", "15": "Luzu", "28": "Davoo"}}
+Si una palabra ya está bien escrita, NO la incluyas.
+"""
+        try:
+            res = await gemini_pool.generate_json(prompt, system_instruction, task_name="polish_transcript")
+            return res if isinstance(res, dict) else {"replacements": {}}
+        except Exception:
+            return {"replacements": {}}
+
     async def _detect_facecam(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Inspects a single video frame JPEG to locate the streamer's webcam rectangle accurately."""
+        """Inspects a single video frame JPEG to classify scene layout and locate facecam if present."""
         image_path = payload["image_path"]
         with open(image_path, "rb") as f:
             b64_img = base64.b64encode(f.read()).decode("utf-8")
 
-        system_instruction = "Eres un analizador de composición visual de streams 16:9."
+        system_instruction = "Eres un director de fotografía que analiza encuadres de streams 16:9."
         prompt = """
-Analiza este fotograma del stream (resolución normalizada de 0.0 a 1.0 en ancho X y alto Y).
-1. ¿Hay un recuadro de cámara web (facecam) superpuesto sobre un gameplay/pantalla, o es una toma de cámara completa (ej: podcast/Just Chatting)?
-2. Si hay facecam superpuesta, indica sus coordenadas normalizadas (0.0 a 1.0): x, y (esquina superior izquierda), w (ancho), h (alto).
-3. Recomienda el mejor layout vertical 9:16:
-   - "split_screen": si hay facecam superpuesta sobre contenido/video/juego
-   - "centered_face": si toda la pantalla es la cámara hablando
-   - "blur_bg": si es un video/pantalla sin cámara o con personas en todo el encuadre
+Analiza este fotograma del video (coordenadas normalizadas 0.0 a 1.0 en X y Y).
+Clasifica el tipo de escena:
+- "two_person_split": hay 2 personas principales hablando lado a lado (podcast/entrevista/debate de 2 cámaras)
+- "multi_panel": hay 3 o más recuadros de personas hablando (mesa de debate/show) y/o pizarra abajo
+- "facecam_gameplay": 1 recuadro pequeño de cámara del streamer superpuesto sobre un videojuego/pantalla
+- "single_speaker": 1 persona ocupando toda la toma hablando a cámara
+- "blur_bg": pantalla completa con gráficas, partido o texto donde no conviene recortar
 
-Devuelve un JSON dict:
+Devuelve un JSON dict exacto:
 {
+  "scene_type": "two_person_split" | "multi_panel" | "facecam_gameplay" | "single_speaker" | "blur_bg",
   "has_facecam": boolean,
-  "layout_recommended": "split_screen" | "centered_face" | "blur_bg",
+  "has_important_bottom_graphic": boolean,
+  "layout_recommended": "duo_split" | "speaker_focus" | "split_screen" | "centered_face" | "blur_bg",
   "webcam_box": {"x": float, "y": float, "w": float, "h": float}
 }
 """
@@ -153,7 +187,9 @@ Devuelve un JSON dict:
             return res
         except Exception:
             return {
+                "scene_type": "blur_bg",
                 "has_facecam": False,
+                "has_important_bottom_graphic": False,
                 "layout_recommended": "blur_bg",
                 "webcam_box": {"x": 0.02, "y": 0.02, "w": 0.30, "h": 0.35},
             }
@@ -164,8 +200,8 @@ Devuelve un JSON dict:
         streamer_name = payload.get("streamer", "Streamer")
 
         system_instruction = (
-            "Eres un editor profesional de clips virales en español para TikTok, Instagram Reels y YouTube Shorts. "
-            "Responde ÚNICAMENTE con un JSON array válido."
+            "Eres un editor profesional de clips en español. Títulos naturales sin exceso de mayúsculas, "
+            "explicación clara del contexto y emojis solo de vez en cuando cuando sumen. Responde en JSON array."
         )
         prompt = f"""
 Streamer: {streamer_name}
@@ -175,14 +211,14 @@ Señales detectadas:
 Transcripción con marcas de tiempo:
 {transcript_text[:25000]}
 
-Extrae entre 4 y 12 momentos virales reales (duración de 15 a 85 segundos) con:
+Extrae entre 4 y 10 momentos reales (18 a 75 segundos) con:
 - "start_sec": float
 - "end_sec": float
-- "hook": string
-- "title": string
-- "reason": string
+- "hook": string (3 a 5 palabras claras)
+- "title": string (título natural <=52 caracteres, máx 1 emoji opcional)
+- "reason": string (explicación de 2 frases claras de lo que ocurre)
 - "virality_score": int (60-99)
-- "event_comment": string
+- "event_comment": string (nota breve sin corchetes)
 - "tags": list[str]
 """
         result = await gemini_pool.generate_json(prompt, system_instruction, task_name="find_moments")
@@ -195,17 +231,17 @@ Extrae entre 4 y 12 momentos virales reales (duración de 15 a 85 segundos) con:
     async def _write_titles(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         clip_summary = payload.get("summary", "")
         hook = payload.get("hook", "")
-        system_instruction = "Eres un estratega de copy viral en español para TikTok, Instagram Reels y Facebook."
+        system_instruction = "Eres estratega editorial en español. Redactas copys limpios, humanos y atractivos, usando emojis con moderación."
         prompt = f"""
 Clip: {clip_summary}
 Gancho base: {hook}
 
 Genera un JSON dict con:
-- "titles": lista de 3 títulos virales en español
-- "caption_instagram": descripción para Instagram Reels con 5 hashtags
-- "caption_tiktok": descripción concisa para TikTok con hashtags
+- "titles": lista de 3 títulos naturales (sin abuso de mayúsculas; máximo 1 emoji opcional en uno o dos de ellos)
+- "caption_instagram": descripción natural para Instagram Reels con 4–5 hashtags relevantes
+- "caption_tiktok": descripción ágil para TikTok con hashtags
 - "caption_facebook": descripción para Facebook Reels
-- "overlay_sticker": texto corto humorístico para tarjeta flotante
+- "overlay_sticker": texto corto de contexto sin corchetes
 """
         return await gemini_pool.generate_json(prompt, system_instruction, task_name="write_titles")
 
@@ -213,8 +249,7 @@ Genera un JSON dict con:
         topic = payload.get("topic", "")
         style = payload.get("style", "curiosities")
         system_instruction = (
-            "Eres un guionista de videos virales de alta retención en español en formato vertical 9:16. "
-            "Duración objetivo: 30 a 50 segundos."
+            "Eres un guionista de videos cortos en español con ritmo ágil (30 a 50 segundos)."
         )
         prompt = f"""
 Tema: {topic}
@@ -229,7 +264,7 @@ Devuelve JSON dict con:
 
     async def _generate_scene_plan(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         script = payload.get("script", {})
-        system_instruction = "Eres director técnico de Motion Graphics para HyperFrames / FFmpeg."
+        system_instruction = "Eres director técnico de Motion Graphics."
         prompt = f"""
 Guion:
 {json.dumps(script, ensure_ascii=False, indent=2)}
@@ -239,7 +274,7 @@ Devuelve un JSON array de escenas con:
 - "template": "kinetic_text" | "stat_card" | "split_highlight" | "curiosity_reveal"
 - "headline": string
 - "subtitle": string
-- "accent_color": string (ej. "#2BF0C8")
+- "accent_color": string
 - "animation_type": "slide_up" | "zoom_in" | "glitch_reveal"
 - "duration_sec": float
 """
