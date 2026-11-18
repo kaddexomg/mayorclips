@@ -1,153 +1,315 @@
 import os
 import uuid
 import asyncio
+import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from sqlmodel import Session, select
 
 from app.db import engine
 from app.models import Project, Moment, Clip, Transcript
-from app.config import MEDIA_DIR, RENDERS_DIR
-from ingest import ingester, analyze_audio_peaks
+from app.config import MEDIA_DIR, CACHE_DIR, RENDERS_DIR, FFMPEG_PATH
+from ingest import ingester, analyze_audio_peaks, scan_kick_chat_peaks
 from pulpo import pulpo
-from render import generate_ass_file, render_vertical_clip
+from render import generate_ass_file, render_vertical_clip, extract_frame_jpeg
+from clipper.transcriber import transcribe_clip_words
+
+
+def _probe_local_duration(video_path: str) -> float:
+    try:
+        ffprobe = str(Path(FFMPEG_PATH).parent / "ffprobe.exe")
+        if not Path(ffprobe).exists():
+            ffprobe = "ffprobe"
+        out = subprocess.check_output(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            text=True,
+            timeout=15,
+        )
+        return float(out.strip())
+    except Exception:
+        return 60.0
+
 
 async def process_project_pipeline(job_id: str, project_id: str, progress_callback=None) -> Dict[str, Any]:
-    """Production stream pipeline: Supports short videos and 8-10 hour massive streams with Heatmap & Audio-First."""
+    """Zero-Bloat Stream Hunter: analyzes 1-min videos AND 8-10h VODs without downloading gigabytes."""
     with Session(engine) as session:
         proj = session.get(Project, project_id)
         if not proj:
             raise ValueError(f"Proyecto {project_id} no encontrado")
         url = proj.source_url
         title = proj.title
+        source_type = proj.source_type
+        local_video = proj.video_path
 
-    if progress_callback:
-        progress_callback(10, "Extrayendo metadatos, duración y curva de retención...")
-
-    # 1. Metadata extraction & Heatmap
-    info = ingester.extract_info(url)
-    dur_sec = float(info.get("duration_sec", 0.0))
-    heatmap = info.get("heatmap", [])
-
-    with Session(engine) as session:
-        proj = session.get(Project, project_id)
-        if proj:
-            proj.title = info.get("title", title)
-            proj.duration_sec = dur_sec
-            proj.status = "ingesting"
-            session.add(proj)
-            session.commit()
-
-    is_long_stream = dur_sec > 7200.0 # More than 2 hours (up to 8-10 hours)
-    top_candidates_ranges = []
-
-    if is_long_stream:
-        if progress_callback:
-            progress_callback(25, f"Detectado stream largo ({round(dur_sec/3600, 1)} horas). Analizando curva de retención y picos de audiencia...")
-
-        # If audience heatmap exists, extract top retention spikes
-        if heatmap:
-            sorted_points = sorted(heatmap, key=lambda p: p.get("value", 0), reverse=True)
-            for p in sorted_points[:12]:
-                s = float(p.get("start_time", 0))
-                e = float(p.get("end_time", s + 45))
-                top_candidates_ranges.append((max(0, s - 30), e + 30, round(p.get("value", 0) * 100)))
+    try:
+        if source_type == "file" and local_video and Path(local_video).exists():
+            if progress_callback:
+                progress_callback(15, "Analizando video local...")
+            dur_sec = await asyncio.to_thread(_probe_local_duration, local_video)
+            info = {
+                "title": title,
+                "duration_sec": dur_sec,
+                "streamer": "Archivo Local",
+                "platform": "file",
+                "low_stream_url": local_video,
+                "heatmap": [],
+                "subs_url": None,
+            }
         else:
-            # Uniform segment sampling across the 8 hours (every 45 minutes)
-            step = dur_sec / 10
-            for i in range(1, 10):
-                center = i * step
-                top_candidates_ranges.append((center - 60, center + 60, 75))
+            if progress_callback:
+                progress_callback(10, "Consultando metadatos, duración y streams disponibles (0 MB descargados)...")
+            info = await asyncio.to_thread(ingester.extract_info, url)
 
-        # Download optimized audio
-        if progress_callback:
-            progress_callback(40, "Descargando segmentos de audio clave de los picos virales...")
-        audio_file = ingester.download_audio_first(url, project_id)
-    else:
-        if progress_callback:
-            progress_callback(25, "Descargando audio optimizado (audio-first)...")
-        audio_file = ingester.download_audio_first(url, project_id)
+        dur_sec = float(info.get("duration_sec") or 0.0)
+        heatmap = info.get("heatmap") or []
+        low_stream_url = info.get("low_stream_url")
+        subs_url = info.get("subs_url")
+        platform = info.get("platform", source_type)
 
-    with Session(engine) as session:
-        proj = session.get(Project, project_id)
-        if proj:
-            proj.audio_path = audio_file
-            session.add(proj)
+        with Session(engine) as session:
+            proj = session.get(Project, project_id)
+            if proj:
+                if proj.title in ("Nueva Transmisión", "", None) or source_type != "file":
+                    proj.title = info.get("title") or title
+                proj.duration_sec = dur_sec
+                proj.status = "analyzing"
+                session.add(proj)
+                session.commit()
+
+        # --- Signal Discovery Phase (Find candidate 90s windows across 0..10h) ---
+        candidate_windows: List[Dict[str, Any]] = []
+
+        # 1. Kick VOD Chat Burst Radar (~3.5s for 10h stream!)
+        if "kick" in platform and info.get("channel_id") and info.get("timestamp") and dur_sec > 180:
+            if progress_callback:
+                progress_callback(22, f"Escaneando chat del stream ({dur_sec/3600:.1f}h) para localizar explosiones virales...")
+            peaks = await scan_kick_chat_peaks(
+                channel_id=str(info["channel_id"]),
+                start_timestamp=float(info["timestamp"]),
+                duration_sec=dur_sec,
+                num_probes=36,
+                top_k=7,
+                min_gap_sec=180.0,
+            )
+            for p in peaks:
+                w_start = max(0.0, p["time_sec"] - 45.0)
+                w_dur = min(90.0, max(30.0, dur_sec - w_start))
+                candidate_windows.append({
+                    "start_sec": w_start,
+                    "dur_sec": w_dur,
+                    "chat_sample": f"({p['count']} msgs en {p['span_sec']}s) {p['sample']}",
+                    "radar_score": p["score"],
+                })
+
+        # 2. YouTube Retention Heatmap (0 MB downloaded!)
+        if not candidate_windows and heatmap:
+            if progress_callback:
+                progress_callback(25, "Analizando curva de retención 'Más repetidos' de YouTube...")
+            sorted_hm = sorted(heatmap, key=lambda x: x.get("value", 0), reverse=True)
+            picked: List[float] = []
+            for pt in sorted_hm:
+                t = float(pt.get("start_time", 0.0))
+                if all(abs(t - old) >= 120.0 for old in picked):
+                    picked.append(t)
+                    w_start = max(0.0, t - 35.0)
+                    w_dur = min(90.0, max(30.0, dur_sec - w_start))
+                    candidate_windows.append({
+                        "start_sec": w_start,
+                        "dur_sec": w_dur,
+                        "chat_sample": f"Pico de repetición de audiencia: {round(pt.get('value', 0)*100)}%",
+                        "radar_score": round(pt.get("value", 0) * 100),
+                    })
+                if len(candidate_windows) >= 7:
+                    break
+
+        # 3. YouTube Auto-Captions fast text path (great for podcasts/talks on YouTube)
+        moments_from_captions: List[Dict[str, Any]] = []
+        if not candidate_windows and subs_url:
+            if progress_callback:
+                progress_callback(30, "Leyendo transcripción directa de YouTube...")
+            segs = await asyncio.to_thread(ingester.fetch_youtube_transcript_segments, subs_url)
+            if segs:
+                lines = [f"[{s['start']:.0f}s] {s['text']}" for s in segs[:500]]
+                full_text = "\n".join(lines)
+                with Session(engine) as session:
+                    session.add(Transcript(project_id=project_id, full_text=full_text[:50000], segments_json=segs[:500]))
+                    session.commit()
+                if progress_callback:
+                    progress_callback(60, "El Pulpo IA está detectando los mejores momentos en la transcripción...")
+                moments_from_captions = await pulpo.run("find_moments", {
+                    "transcript": full_text,
+                    "signals": {"duration_sec": dur_sec, "source": "youtube_captions"},
+                    "streamer": info.get("streamer", "Creador"),
+                })
+
+        # 4. Distributed Window Sampling (works on ANY platform: Twitch, short videos, Kick fallback, local files)
+        if not candidate_windows and not moments_from_captions:
+            if dur_sec <= 480:
+                # Short video (<8 min): slice sequentially into up to 4 windows covering the whole video
+                if progress_callback:
+                    progress_callback(28, "Preparando ventanas de audio del video...")
+                step = 110.0
+                t = 0.0
+                while t < max(1.0, dur_sec - 10.0) and len(candidate_windows) < 4:
+                    w_dur = min(115.0, dur_sec - t)
+                    candidate_windows.append({
+                        "start_sec": t,
+                        "dur_sec": w_dur,
+                        "chat_sample": "Video completo",
+                        "radar_score": 80,
+                    })
+                    t += step
+            else:
+                # Long stream (>8 min up to 10h) without heatmap/Kick chat: sample 7 spaced 90s windows
+                if progress_callback:
+                    progress_callback(28, f"Muestreando {dur_sec/3600:.1f}h de transmisión por streaming directo...")
+                n_samples = 7
+                usable_start = min(180.0, dur_sec * 0.05)
+                usable_end = max(usable_start + 90.0, dur_sec - 120.0)
+                step = (usable_end - usable_start) / n_samples
+                for i in range(n_samples):
+                    w_start = usable_start + i * step
+                    candidate_windows.append({
+                        "start_sec": w_start,
+                        "dur_sec": min(90.0, dur_sec - w_start),
+                        "chat_sample": f"Muestra estratégica #{i+1}",
+                        "radar_score": 70,
+                    })
+
+        # --- Multimodal Audio Listening Phase ---
+        discovered_moments: List[Dict[str, Any]] = []
+        heard_transcripts: List[str] = []
+
+        if candidate_windows:
+            total_w = len(candidate_windows)
+            for idx, win in enumerate(candidate_windows):
+                pct = 35 + int((idx / total_w) * 55)
+                h, m = divmod(int(win["start_sec"] // 60), 60)
+                if progress_callback:
+                    progress_callback(pct, f"Escuchando segmento {idx+1}/{total_w} (@{h:02d}h{m:02d}m) con El Pulpo IA...")
+
+                slice_audio = str(CACHE_DIR / f"probe_{project_id[:8]}_{idx}.m4a")
+                try:
+                    await asyncio.to_thread(
+                        ingester.extract_audio_slice,
+                        low_stream_url,
+                        win["start_sec"],
+                        win["dur_sec"],
+                        slice_audio,
+                        url if source_type != "file" else None,
+                    )
+                    res = await pulpo.run("analyze_audio_window", {
+                        "audio_path": slice_audio,
+                        "window_start_sec": win["start_sec"],
+                        "window_dur_sec": win["dur_sec"],
+                        "streamer": info.get("streamer", "Streamer"),
+                        "stream_title": info.get("title", title),
+                        "chat_sample": win["chat_sample"],
+                    })
+                    if res:
+                        off_s = float(res.get("start_offset_sec", 10.0))
+                        off_e = float(res.get("end_offset_sec", off_s + 45.0))
+                        off_s = max(0.0, min(win["dur_sec"] - 15.0, off_s))
+                        off_e = max(off_s + 15.0, min(win["dur_sec"], off_e))
+                        g_start = round(win["start_sec"] + off_s, 2)
+                        g_end = round(win["start_sec"] + off_e, 2)
+
+                        summary = res.get("transcript_summary", "")
+                        if summary:
+                            heard_transcripts.append(f"[{h:02d}:{m:02d}] {summary}")
+
+                        discovered_moments.append({
+                            "start_sec": g_start,
+                            "end_sec": g_end,
+                            "hook": res.get("hook", "MIRA ESTO"),
+                            "title": res.get("title", "Momento del Stream"),
+                            "reason": res.get("reason", summary or "Momento destacado en vivo"),
+                            "virality_score": int(res.get("virality_score", 78)),
+                            "event_comment": res.get("event_comment"),
+                            "tags": res.get("tags", []),
+                        })
+                except Exception as win_err:
+                    print(f"[PIPELINE] Ventana {idx} falló ({win['start_sec']}s): {win_err}")
+                finally:
+                    if Path(slice_audio).exists():
+                        try:
+                            Path(slice_audio).unlink()
+                        except Exception:
+                            pass
+        elif moments_from_captions:
+            discovered_moments = moments_from_captions
+
+        # Persist Moments & Transcript into SQLite
+        saved_count = 0
+        top_score = 0
+        with Session(engine) as session:
+            prev_moments = session.exec(select(Moment).where(Moment.project_id == project_id)).all()
+            for pm in prev_moments:
+                session.delete(pm)
+
+            if heard_transcripts:
+                session.add(Transcript(
+                    project_id=project_id,
+                    full_text="\n".join(heard_transcripts),
+                    segments_json=[],
+                ))
+
+            for m_data in discovered_moments:
+                s_sec = max(0.0, float(m_data.get("start_sec", 0.0)))
+                e_sec = float(m_data.get("end_sec", s_sec + 35.0))
+                if e_sec <= s_sec:
+                    e_sec = s_sec + 35.0
+                score = max(1, min(99, int(m_data.get("virality_score", 78))))
+                top_score = max(top_score, score)
+
+                moment = Moment(
+                    project_id=project_id,
+                    start_sec=s_sec,
+                    end_sec=e_sec,
+                    duration_sec=round(e_sec - s_sec, 2),
+                    hook=str(m_data.get("hook", "MIRA ESTO"))[:120],
+                    title=str(m_data.get("title", "Momento Viral"))[:120],
+                    reason=str(m_data.get("reason", "Momento destacado")),
+                    virality_score=score,
+                    event_comment=m_data.get("event_comment"),
+                    tags_json=m_data.get("tags", []),
+                )
+                session.add(moment)
+                saved_count += 1
+
+            proj = session.get(Project, project_id)
+            if proj:
+                proj.status = "ready"
+                proj.error_message = None
+                session.add(proj)
             session.commit()
 
-    if progress_callback:
-        progress_callback(55, "Analizando picos de risas, gritos y energía de audio...")
+        if saved_count == 0:
+            raise RuntimeError("No se pudieron extraer momentos analizables de este enlace. Verifica que el VOD sea público.")
 
-    # Analyze audio volume spikes
-    peaks = analyze_audio_peaks(audio_file)
-    top_peaks = sorted(peaks, key=lambda p: p["intensity"], reverse=True)[:25]
+        if progress_callback:
+            progress_callback(100, f"¡Listo! {saved_count} momentos reales extraídos del stream.")
 
-    if progress_callback:
-        progress_callback(75, "El Pulpo IA está seleccionando y puntuando los momentos de mayor retención...")
+        return {
+            "project_id": project_id,
+            "moments_count": saved_count,
+            "top_virality": top_score,
+            "duration_hours": round(dur_sec / 3600, 2),
+        }
 
-    # Transcribe summary and generate moments
-    transcript_summary = (
-        f"Transmisión de {info.get('streamer', 'Streamer')}: {info.get('title')}. "
-        f"Duración total: {round(dur_sec/60, 1)} minutos. "
-        f"Se detectaron picos de actividad y volumen en los segundos: {[p['time_sec'] for p in top_peaks[:10]]}."
-    )
+    except Exception as e:
+        with Session(engine) as session:
+            proj = session.get(Project, project_id)
+            if proj:
+                proj.status = "error"
+                proj.error_message = str(e)
+                session.add(proj)
+                session.commit()
+        raise
 
-    moments_raw = await pulpo.run("find_moments", {
-        "transcript": transcript_summary,
-        "signals": {
-            "duration_sec": dur_sec,
-            "audio_peaks": top_peaks[:10],
-            "long_stream": is_long_stream
-        },
-        "streamer": info.get("streamer", "Streamer")
-    })
-
-    created_moments = []
-    with Session(engine) as session:
-        # Clear previous moments if re-running
-        prev_moments = session.exec(select(Moment).where(Moment.project_id == project_id)).all()
-        for pm in prev_moments:
-            session.delete(pm)
-
-        for m_data in moments_raw:
-            start_t = float(m_data.get("start_sec", 0.0))
-            end_t = float(m_data.get("end_sec", start_t + 35.0))
-            if start_t < 0: start_t = 0.0
-            if end_t <= start_t: end_t = start_t + 30.0
-            dur = round(end_t - start_t, 2)
-
-            moment = Moment(
-                project_id=project_id,
-                start_sec=start_t,
-                end_sec=end_t,
-                duration_sec=dur,
-                hook=m_data.get("hook", "MIRA ESTO"),
-                title=m_data.get("title", "Momento Viral"),
-                reason=m_data.get("reason", "Pico de reacción"),
-                virality_score=int(m_data.get("virality_score", 85)),
-                event_comment=m_data.get("event_comment", None),
-                tags_json=m_data.get("tags", [])
-            )
-            session.add(moment)
-            created_moments.append(moment)
-
-        proj = session.get(Project, project_id)
-        if proj:
-            proj.status = "ready"
-            session.add(proj)
-        session.commit()
-
-    if progress_callback:
-        progress_callback(100, f"¡Análisis completado! Se encontraron {len(created_moments)} clips virales listos.")
-
-    return {
-        "project_id": project_id,
-        "moments_count": len(created_moments),
-        "duration_hours": round(dur_sec / 3600, 2)
-    }
 
 async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=None) -> Dict[str, Any]:
-    """Renders a single approved clip: downloads slice, builds animated subs, encodes 9:16 vertical video."""
+    """Renders a 1080x1920 clip: surgical 1080p slice -> Vision webcam detect -> Whisper real words -> AMF encode."""
     with Session(engine) as session:
         clip = session.get(Clip, clip_id)
         if not clip:
@@ -155,62 +317,130 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
         proj = session.get(Project, clip.project_id)
         if not proj:
             raise ValueError(f"Proyecto {clip.project_id} no existe")
-        
+
+        clip.status = "rendering"
+        session.add(clip)
+        session.commit()
+
         url = proj.source_url
-        start_sec = clip.start_sec
-        end_sec = clip.end_sec
+        source_type = proj.source_type
+        local_video = proj.video_path
+        start_sec = float(clip.start_sec)
+        end_sec = float(clip.end_sec)
         layout = clip.layout
         sub_style = clip.subtitle_style
         hook_text = clip.hook_text or clip.title
         event_comment = clip.event_comment or ""
 
-    if progress_callback:
-        progress_callback(15, f"Descargando fragmento exacto ({round(end_sec - start_sec)}s) del stream...")
+    duration = max(5.0, end_sec - start_sec)
+    slice_path = None
+    temp_slice_created = False
+    frame_jpg = str(CACHE_DIR / f"frame_{clip_id[:8]}.jpg")
+    ass_path = str(CACHE_DIR / f"subs_{clip_id[:8]}.ass")
 
-    # Download section
-    slice_filename = f"slice_{clip_id[:8]}.mp4"
-    slice_path = ingester.download_clip_section(url, start_sec, end_sec, slice_filename)
+    try:
+        if source_type == "file" and local_video and Path(local_video).exists():
+            if progress_callback:
+                progress_callback(15, f"Cortando segmento de {round(duration)}s del archivo local...")
+            slice_path = str(MEDIA_DIR / f"slice_{clip_id[:8]}.mp4")
+            cmd = [
+                FFMPEG_PATH, "-y", "-hide_banner", "-loglevel", "error",
+                "-ss", str(round(start_sec, 2)), "-t", str(round(duration, 2)),
+                "-i", local_video, "-c", "copy", slice_path
+            ]
+            await asyncio.to_thread(subprocess.run, cmd, check=True)
+            temp_slice_created = True
+        else:
+            if progress_callback:
+                progress_callback(12, "Resolviendo URL HD del fragmento...")
+            info = await asyncio.to_thread(ingester.extract_info, url)
+            hq_url = info.get("hq_muxed_url")
 
-    if progress_callback:
-        progress_callback(50, "Generando subtítulos dinámicos y estilos visuales...")
+            if progress_callback:
+                progress_callback(25, f"Descargando únicamente el clip de {round(duration)}s en HD...")
+            slice_filename = f"slice_{clip_id[:8]}.mp4"
+            slice_path = await asyncio.to_thread(
+                ingester.download_clip_section, url, start_sec, end_sec, slice_filename, hq_url
+            )
+            temp_slice_created = True
 
-    # Generate word timings
-    duration = max(1.0, end_sec - start_sec)
-    sample_words = []
-    tokens = (hook_text + " " + (clip.title if clip.title != hook_text else "")).strip().split()
-    if tokens:
-        w_dur = min(1.2, duration / len(tokens))
-        for i, t in enumerate(tokens):
-            w_s = round(i * w_dur, 2)
-            w_e = round(w_s + w_dur, 2)
-            sample_words.append({"word": t, "start_sec": w_s, "end_sec": w_e})
+        # 2. Gemini Vision facecam detection on 1 frame
+        if progress_callback:
+            progress_callback(42, "Detectando encuadre y posición de cámara con IA...")
+        webcam_box = None
+        extracted_jpg = await asyncio.to_thread(extract_frame_jpeg, slice_path, frame_jpg, min(2.0, duration / 2))
+        if extracted_jpg:
+            vision = await pulpo.run("detect_facecam", {"image_path": extracted_jpg})
+            webcam_box = vision.get("webcam_box")
+            if layout == "split_screen" and vision.get("has_facecam") is False:
+                # Auto-adapt only if there is genuinely no facecam overlay on screen
+                layout = vision.get("layout_recommended", "blur_bg")
 
-    ass_path = str(MEDIA_DIR / f"subs_{clip_id[:8]}.ass")
-    generate_ass_file(sample_words, ass_path, style_name=sub_style, title_hook=hook_text, event_comment=event_comment)
+        # 3. Real local faster-whisper word-level transcription
+        if progress_callback:
+            progress_callback(58, "Transcribiendo audio real palabra por palabra (Whisper local)...")
+        words = await asyncio.to_thread(transcribe_clip_words, slice_path, "es")
+        if not words:
+            # Fallback if segment is purely instrumental/non-speech
+            words = [{"word": w, "start_sec": round(i * 0.4, 2), "end_sec": round((i + 1) * 0.4, 2)} for i, w in enumerate(hook_text.split()[:6])]
 
-    if progress_callback:
-        progress_callback(75, "Codificando video vertical 9:16 con AMD AMF...")
+        await asyncio.to_thread(
+            generate_ass_file, words, ass_path, style_name=sub_style, title_hook=hook_text, event_comment=event_comment
+        )
 
-    out_mp4 = f"clip_{clip_id[:8]}_vertical.mp4"
-    render_res = render_vertical_clip(
-        source_video_path=slice_path,
-        output_filename=out_mp4,
-        layout=layout,
-        start_sec=0.0,
-        end_sec=duration,
-        ass_subtitle_path=ass_path
-    )
+        # 4. Hardware-accelerated render
+        if progress_callback:
+            progress_callback(78, "Renderizando vertical 9:16 con subtítulos y AMD AMF...")
+        out_mp4 = f"clip_{clip_id[:8]}_vertical.mp4"
+        render_res = await asyncio.to_thread(
+            render_vertical_clip,
+            slice_path,
+            out_mp4,
+            layout,
+            0.0,
+            duration,
+            ass_path,
+            webcam_box,
+        )
 
-    with Session(engine) as session:
-        clip = session.get(Clip, clip_id)
-        if clip:
-            clip.status = "ready"
-            clip.output_path = render_res["output_path"]
-            clip.thumbnail_path = render_res["thumbnail_path"]
-            session.add(clip)
-            session.commit()
+        with Session(engine) as session:
+            clip = session.get(Clip, clip_id)
+            if clip:
+                clip.status = "ready"
+                clip.layout = layout
+                clip.output_path = render_res["output_path"]
+                clip.thumbnail_path = render_res["thumbnail_path"]
+                clip.error_message = None
+                session.add(clip)
+                session.commit()
 
-    if progress_callback:
-        progress_callback(100, "¡Clip renderizado exitosamente y listo para publicar!")
+        if progress_callback:
+            progress_callback(100, "¡Clip vertical 9:16 renderizado y listo para publicar!")
 
-    return render_res
+        return {
+            **render_res,
+            "video_url": f"/renders/{out_mp4}",
+            "words_transcribed": len(words),
+        }
+
+    except Exception as e:
+        with Session(engine) as session:
+            clip = session.get(Clip, clip_id)
+            if clip:
+                clip.status = "failed"
+                clip.error_message = str(e)
+                session.add(clip)
+                session.commit()
+        raise
+    finally:
+        for tmp in [frame_jpg, ass_path]:
+            if tmp and Path(tmp).exists():
+                try:
+                    Path(tmp).unlink()
+                except Exception:
+                    pass
+        if temp_slice_created and slice_path and Path(slice_path).exists():
+            try:
+                Path(slice_path).unlink()
+            except Exception:
+                pass

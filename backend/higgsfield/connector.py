@@ -1,5 +1,6 @@
 import os
 import uuid
+import asyncio
 import httpx
 import subprocess
 from pathlib import Path
@@ -104,7 +105,7 @@ class HiggsfieldConnector:
             "-pix_fmt", "yuv420p",
             str(out_mp4)
         ]
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        proc = await asyncio.to_thread(subprocess.run, cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         if proc.returncode != 0:
             raise RuntimeError(f"Error generando B-roll cinematográfico: {proc.stderr.decode('utf-8', errors='ignore')}")
 

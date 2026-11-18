@@ -5,6 +5,7 @@ import NewProjectView from "./views/NewProjectView";
 import ClipsView from "./views/ClipsView";
 import CinemaStudioView from "./views/CinemaStudioView";
 import PublisherView from "./views/PublisherView";
+import AccountsView from "./views/AccountsView";
 import StatsView from "./views/StatsView";
 import StudioView from "./views/StudioView";
 import PulpoView from "./views/PulpoView";
@@ -54,15 +55,19 @@ export default function App() {
         )}
         {currentTab === "cinema" && <CinemaStudioView />}
         {currentTab === "publisher" && (
-          <PublisherView selectedClipForPublish={selectedClipForPublish} />
+          <PublisherView
+            selectedClipForPublish={selectedClipForPublish}
+            setTab={setTab}
+          />
         )}
+        {currentTab === "accounts" && <AccountsView />}
         {currentTab === "stats" && <StatsView />}
         {currentTab === "studio" && <StudioView />}
         {currentTab === "pulpo" && <PulpoView />}
       </main>
 
       <footer className="border-t border-white/5 py-5 text-center text-xs font-mono text-neutral-500 bg-abyss/80">
-        MayorClips v1.1.0 · Motor de Clipping con IA, Motion Graphics & Cinema Studio (Higgsfield Ready)
+        MayorClips v1.2.0 · Zero-Bloat Stream Hunter · Pulpo 7 Keys + Whisper Local + AMD AMF
       </footer>
     </div>
   );

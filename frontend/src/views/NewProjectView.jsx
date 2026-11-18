@@ -1,17 +1,28 @@
-import React, { useState } from "react";
-import { Link2, Sparkles, Loader2, CheckCircle2, AlertCircle, Radio, Play } from "lucide-react";
+import React, { useState, useRef, useEffect } from "react";
+import { Link2, Sparkles, Loader2, AlertCircle, Radio, Upload, FileVideo } from "lucide-react";
 import { api } from "../api";
 
 export default function NewProjectView({ setTab, onProjectCreated }) {
+  const [mode, setMode] = useState("url"); // "url" | "file"
   const [url, setUrl] = useState("");
   const [title, setTitle] = useState("");
-  const [sourceType, setSourceType] = useState("youtube");
+  const [sourceType, setSourceType] = useState("kick");
+  const [localFile, setLocalFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("");
   const [error, setError] = useState(null);
 
-  // Auto-detect source platform from URL
+  const pollRef = useRef(null);
+  const wsRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, []);
+
   const handleUrlChange = (e) => {
     const val = e.target.value;
     setUrl(val);
@@ -20,61 +31,78 @@ export default function NewProjectView({ setTab, onProjectCreated }) {
     else if (val.includes("youtube.com") || val.includes("youtu.be")) setSourceType("youtube");
   };
 
+  const trackJobProgress = (jobId, proj) => {
+    let finished = false;
+
+    const finishSuccess = async () => {
+      if (finished) return;
+      finished = true;
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (wsRef.current) wsRef.current.close();
+      const updatedProj = await api.getProject(proj.id).catch(() => proj);
+      setLoading(false);
+      onProjectCreated(updatedProj);
+      setTab("clips");
+    };
+
+    const finishError = (errText) => {
+      if (finished) return;
+      finished = true;
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (wsRef.current) wsRef.current.close();
+      setLoading(false);
+      setError(errText || "Error procesando la transmisión.");
+    };
+
+    try {
+      const ws = new WebSocket("ws://127.0.0.1:8000/ws/jobs");
+      wsRef.current = ws;
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "job_update" && data.job_id === jobId) {
+            if (typeof data.progress === "number") setProgress(data.progress);
+            if (data.message) setStatusMsg(data.message);
+            if (data.status === "completed") finishSuccess();
+            else if (data.status === "failed") finishError(data.error);
+          }
+        } catch (_) {}
+      };
+    } catch (_) {}
+
+    // Always keep reliable 2s polling active alongside WebSocket
+    pollRef.current = setInterval(async () => {
+      try {
+        const job = await api.getJobStatus(jobId);
+        if (typeof job.progress === "number") setProgress(job.progress);
+        if (job.message) setStatusMsg(job.message);
+        if (job.status === "completed") finishSuccess();
+        else if (job.status === "failed") finishError(job.error_message || job.message);
+      } catch (_) {}
+    }, 2000);
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!url.trim()) return;
+    if (mode === "url" && !url.trim()) return;
+    if (mode === "file" && !localFile) return;
 
     setLoading(true);
     setError(null);
     setProgress(5);
-    setStatusMsg("Registrando proyecto...");
+    setStatusMsg(mode === "file" ? "Subiendo archivo de video..." : "Registrando transmisión...");
 
     try {
-      // 1. Create project
-      const proj = await api.createProject(url, title || "Nueva Transmisión", sourceType);
-      setProgress(15);
-      setStatusMsg("Conectando con el stream e iniciando pipeline de IA...");
+      const proj =
+        mode === "file"
+          ? await api.uploadProjectFile(localFile, title || localFile.name)
+          : await api.createProject(url.trim(), title.trim() || "Nueva Transmisión", sourceType);
 
-      // 2. Trigger analysis
+      setProgress(12);
+      setStatusMsg("Iniciando motor Stream Hunter (0-bloat)...");
+
       const res = await api.analyzeProject(proj.id);
-      
-      // 3. Connect to WebSocket for live job progress
-      const ws = new WebSocket("ws://127.0.0.1:8000/ws/jobs");
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === "job_update" && data.job_id === res.job_id) {
-            setProgress(data.progress || 20);
-            setStatusMsg(data.message || "Procesando...");
-            if (data.status === "completed") {
-              ws.close();
-              setLoading(false);
-              onProjectCreated(proj);
-              setTab("clips");
-            } else if (data.status === "failed") {
-              ws.close();
-              setLoading(false);
-              setError(data.error || "Ocurrió un error en el pipeline");
-            }
-          }
-        } catch (_) {}
-      };
-
-      ws.onerror = () => {
-        // Fallback polling if ws fails
-        const interval = setInterval(async () => {
-          try {
-            const updated = await api.getProject(proj.id);
-            if (updated.status === "ready") {
-              clearInterval(interval);
-              setLoading(false);
-              onProjectCreated(updated);
-              setTab("clips");
-            }
-          } catch (_) {}
-        }, 3000);
-      };
-
+      trackJobProgress(res.job_id, proj);
     } catch (err) {
       setError(err.message);
       setLoading(false);
@@ -85,64 +113,105 @@ export default function NewProjectView({ setTab, onProjectCreated }) {
     <div className="max-w-3xl mx-auto space-y-8 animate-fadeIn">
       <div className="text-center space-y-2">
         <h1 className="font-display font-bold text-3xl text-white">
-          Procesar Transmisión o VOD
+          Procesar Transmisión o Video
         </h1>
         <p className="text-neutral-400 text-sm">
-          Pega el enlace de un directo de Twitch, Kick o un video de YouTube. El pipeline audio-first descargará únicamente los datos necesarios y el Pulpo IA encontrará los momentos más virales.
+          Soporta directos de hasta 10 horas en Kick, Twitch o YouTube sin descargar el video completo. Detecta explosiones del chat y escucha los mejores momentos con El Pulpo IA.
         </p>
       </div>
 
-      <div className="rounded-2xl bg-ink/70 border border-white/10 p-7 shadow-card-glow space-y-6">
+      <div className="glass-panel rounded-2xl p-7 space-y-6">
+        {/* Mode Switch */}
+        <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-abyss border border-white/5">
+          <button
+            type="button"
+            onClick={() => setMode("url")}
+            className={`btn-tactile py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-2 ${
+              mode === "url" ? "bg-brand text-abyss font-bold" : "text-neutral-400 hover:text-white"
+            }`}
+          >
+            <Link2 className="h-3.5 w-3.5" /> Enlace (Kick / Twitch / YT)
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("file")}
+            className={`btn-tactile py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-2 ${
+              mode === "file" ? "bg-brand text-abyss font-bold" : "text-neutral-400 hover:text-white"
+            }`}
+          >
+            <Upload className="h-3.5 w-3.5" /> Subir Archivo Local
+          </button>
+        </div>
+
         <form onSubmit={handleSubmit} className="space-y-5">
-          {/* Platform Selector Buttons */}
-          <div className="space-y-2">
-            <label className="text-xs font-mono text-neutral-400 uppercase tracking-wider">
-              Plataforma de Origen
-            </label>
-            <div className="grid grid-cols-3 gap-3">
-              {[
-                { id: "twitch", label: "Twitch VOD / Clip", color: "border-purple-500/40 text-purple-300" },
-                { id: "kick", label: "Kick Stream", color: "border-emerald-500/40 text-emerald-300" },
-                { id: "youtube", label: "YouTube Video / Live", color: "border-red-500/40 text-red-300" },
-              ].map((plat) => (
-                <button
-                  type="button"
-                  key={plat.id}
-                  onClick={() => setSourceType(plat.id)}
-                  className={`p-3 rounded-xl border text-xs font-medium transition text-center flex items-center justify-center gap-2 ${
-                    sourceType === plat.id
-                      ? "bg-brand/10 border-brand text-brand font-semibold shadow-sm"
-                      : "bg-abyss/60 border-white/5 text-neutral-400 hover:border-white/20"
-                  }`}
-                >
-                  <Radio className={`h-3.5 w-3.5 ${sourceType === plat.id ? "text-brand" : "text-neutral-500"}`} />
-                  {plat.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* URL Input */}
-          <div className="space-y-2">
-            <label className="text-xs font-mono text-neutral-400 uppercase tracking-wider">
-              Enlace del Video o Directo
-            </label>
-            <div className="relative">
-              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                <Link2 className="h-4 w-4 text-neutral-500" />
+          {mode === "url" ? (
+            <>
+              <div className="space-y-2">
+                <label className="text-xs font-mono text-neutral-400 uppercase tracking-wider">
+                  Plataforma de Origen
+                </label>
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    { id: "kick", label: "Kick VOD / Clip" },
+                    { id: "twitch", label: "Twitch VOD / Clip" },
+                    { id: "youtube", label: "YouTube Video / Live" },
+                  ].map((plat) => (
+                    <button
+                      type="button"
+                      key={plat.id}
+                      onClick={() => setSourceType(plat.id)}
+                      className={`btn-tactile p-3 rounded-xl border text-xs font-medium text-center flex items-center justify-center gap-2 ${
+                        sourceType === plat.id
+                          ? "bg-brand/10 border-brand text-brand font-semibold"
+                          : "bg-abyss/60 border-white/5 text-neutral-400 hover:border-white/20"
+                      }`}
+                    >
+                      <Radio className={`h-3.5 w-3.5 ${sourceType === plat.id ? "text-brand" : "text-neutral-500"}`} />
+                      {plat.label}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <input
-                type="url"
-                required
-                value={url}
-                onChange={handleUrlChange}
-                placeholder="https://www.twitch.tv/videos/... o https://youtube.com/watch?v=..."
-                className="w-full pl-10 pr-4 py-3 rounded-xl bg-abyss border border-white/10 text-white placeholder-neutral-500 text-sm focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand font-sans transition"
-              />
-            </div>
-          </div>
 
-          {/* Optional Title */}
+              <div className="space-y-2">
+                <label className="text-xs font-mono text-neutral-400 uppercase tracking-wider">
+                  Enlace del Video o Directo
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                    <Link2 className="h-4 w-4 text-neutral-500" />
+                  </div>
+                  <input
+                    type="url"
+                    required
+                    value={url}
+                    onChange={handleUrlChange}
+                    placeholder="https://kick.com/streamer/videos/... o https://youtube.com/watch?v=..."
+                    className="w-full pl-10 pr-4 py-3 rounded-xl bg-abyss border border-white/10 text-white placeholder-neutral-500 text-sm focus:outline-none focus:border-brand font-sans"
+                  />
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="space-y-2">
+              <label className="text-xs font-mono text-neutral-400 uppercase tracking-wider">
+                Archivo de Video (MP4, MKV, MOV)
+              </label>
+              <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-white/15 rounded-xl cursor-pointer bg-abyss/60 hover:border-brand/50 transition">
+                <FileVideo className="h-7 w-7 text-brand mb-2" />
+                <span className="text-xs text-neutral-300 font-medium">
+                  {localFile ? `${localFile.name} (${(localFile.size / (1024 * 1024)).toFixed(1)} MB)` : "Haz clic para seleccionar tu video"}
+                </span>
+                <input
+                  type="file"
+                  accept="video/*"
+                  className="hidden"
+                  onChange={(e) => setLocalFile(e.target.files?.[0] || null)}
+                />
+              </label>
+            </div>
+          )}
+
           <div className="space-y-2">
             <label className="text-xs font-mono text-neutral-400 uppercase tracking-wider">
               Título del Proyecto (Opcional)
@@ -151,21 +220,20 @@ export default function NewProjectView({ setTab, onProjectCreated }) {
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="Ej: Torneo de Minecraft / Directo Épico con Reacciones"
-              className="w-full px-4 py-2.5 rounded-xl bg-abyss border border-white/10 text-white placeholder-neutral-500 text-sm focus:outline-none focus:border-brand font-sans transition"
+              placeholder="Ej: Directo Kick Davoo / Torneo Épico"
+              className="w-full px-4 py-2.5 rounded-xl bg-abyss border border-white/10 text-white placeholder-neutral-500 text-sm focus:outline-none focus:border-brand font-sans"
             />
           </div>
 
-          {/* Submit Button */}
           <button
             type="submit"
-            disabled={loading || !url.trim()}
-            className="w-full py-3.5 rounded-xl bg-brand text-abyss font-display font-bold text-sm hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-2 shadow-brand-glow"
+            disabled={loading || (mode === "url" ? !url.trim() : !localFile)}
+            className="btn-tactile w-full py-3.5 rounded-xl bg-brand text-abyss font-display font-bold text-sm hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-brand-glow"
           >
             {loading ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Procesando transmisión con IA...
+                Analizando con El Pulpo IA...
               </>
             ) : (
               <>
@@ -176,7 +244,6 @@ export default function NewProjectView({ setTab, onProjectCreated }) {
           </button>
         </form>
 
-        {/* Live Progress Bar */}
         {loading && (
           <div className="rounded-xl bg-abyss/80 border border-brand/30 p-4 space-y-3 animate-fadeIn">
             <div className="flex items-center justify-between text-xs font-mono">
@@ -193,7 +260,7 @@ export default function NewProjectView({ setTab, onProjectCreated }) {
               ></div>
             </div>
             <p className="text-[11px] text-neutral-400">
-              * Pipeline Audio-First: descargando únicamente el audio y picos de volumen para ahorrar recursos de tu procesador Ryzen 5.
+              * Radar de Chat + Extracción Quirúrgica: analizamos streams largos de hasta 10h escuchando solo los picos clave sin llenar tu disco.
             </p>
           </div>
         )}
