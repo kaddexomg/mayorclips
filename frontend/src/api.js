@@ -35,18 +35,24 @@ export const api = {
       body: JSON.stringify({ summary, hook }),
     }),
 
-  // Projects
-  createProject: (url, title, sourceType) =>
+  // Projects & Live Streams
+  createProject: (url, title, sourceType, contextHint) =>
     fetchApi("/projects", {
       method: "POST",
-      body: JSON.stringify({ url, title, source_type: sourceType }),
+      body: JSON.stringify({ url, title, source_type: sourceType, context_hint: contextHint || null }),
     }),
-  uploadProjectFile: (file, title) => {
+  uploadProjectFile: (file, title, contextHint) => {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("title", title || file.name);
+    if (contextHint) fd.append("context_hint", contextHint);
     return fetchApi("/projects/upload", { method: "POST", body: fd });
   },
+  startLiveCapture: (data) =>
+    fetchApi("/live/start", { method: "POST", body: JSON.stringify(data) }),
+  getLiveStatus: (projectId) => fetchApi(`/live/${projectId}/status`),
+  stopLiveAndAnalyze: (projectId) =>
+    fetchApi(`/live/${projectId}/stop-and-analyze`, { method: "POST" }),
   listProjects: () => fetchApi("/projects"),
   getProject: (id) => fetchApi(`/projects/${id}`),
   deleteProject: (id) => fetchApi(`/projects/${id}`, { method: "DELETE" }),

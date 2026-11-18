@@ -10,6 +10,7 @@ from app.db import engine
 from app.models import Project, Moment, Clip, Transcript
 from app.config import MEDIA_DIR, CACHE_DIR, RENDERS_DIR, FFMPEG_PATH
 from ingest import ingester, analyze_audio_peaks, scan_kick_chat_peaks
+from ingest.live_recorder import live_recorder
 from pulpo import pulpo
 from render import generate_ass_file, render_vertical_clip, extract_frame_jpeg, render_pill_overlay_png
 from clipper.transcriber import transcribe_clip_words, polish_words_with_pulpo
@@ -31,8 +32,18 @@ def _probe_local_duration(video_path: str) -> float:
         return 60.0
 
 
+def _chapter_at(chapters: List[Dict[str, Any]], t_sec: float) -> str:
+    """Returns matching Twitch/YouTube chapter or game title at timestamp t_sec."""
+    for ch in chapters or []:
+        st = float(ch.get("start_time") or 0.0)
+        en = float(ch.get("end_time") or 1e9)
+        if st <= t_sec <= en and ch.get("title"):
+            return str(ch["title"])
+    return ""
+
+
 async def process_project_pipeline(job_id: str, project_id: str, progress_callback=None) -> Dict[str, Any]:
-    """Zero-Bloat Stream Hunter: analyzes 1-min videos AND 8-10h VODs without downloading gigabytes."""
+    """Zero-Bloat Stream Hunter: analyzes 1-min videos, 8-10h VODs, AND active Live streams without downloading gigabytes."""
     with Session(engine) as session:
         proj = session.get(Project, project_id)
         if not proj:
@@ -41,28 +52,53 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
         title = proj.title
         source_type = proj.source_type
         local_video = proj.video_path
+        user_context = (proj.context_hint or "").strip()
 
     try:
-        if source_type == "file" and local_video and Path(local_video).exists():
+        if source_type in ("file", "live") and local_video and Path(local_video).exists():
             if progress_callback:
-                progress_callback(15, "Analizando video local...")
+                progress_callback(15, "Analizando grabación local...")
             dur_sec = await asyncio.to_thread(_probe_local_duration, local_video)
             info = {
                 "title": title,
                 "duration_sec": dur_sec,
-                "streamer": "Archivo Local",
-                "platform": "file",
+                "streamer": "Creador",
+                "platform": source_type,
                 "low_stream_url": local_video,
                 "heatmap": [],
+                "chapters": [],
                 "subs_url": None,
+                "is_live": False,
             }
         else:
             if progress_callback:
                 progress_callback(10, "Consultando metadatos, duración y streams disponibles (0 MB descargados)...")
             info = await asyncio.to_thread(ingester.extract_info, url)
 
+            # If the user pasted a currently LIVE stream into normal mode, capture a quick 120s live buffer cleanly
+            if info.get("is_live"):
+                cap_target = 120
+                if progress_callback:
+                    progress_callback(14, "🔴 Directo EN VIVO detectado: capturando 2 minutos en vivo para extraer clips...")
+                await asyncio.to_thread(live_recorder.start_capture, project_id, url, cap_target)
+                while True:
+                    st = live_recorder.get_status(project_id)
+                    if not st.get("recording") or st.get("elapsed_sec", 0) >= cap_target:
+                        break
+                    pct_live = min(32, 14 + int((st.get("elapsed_sec", 0) / cap_target) * 18))
+                    if progress_callback:
+                        progress_callback(pct_live, f"🔴 Capturando directo en vivo ({int(st.get('elapsed_sec', 0))}s/{cap_target}s · {st.get('file_size_mb', 0)} MB)...")
+                    await asyncio.sleep(3.0)
+                stop_res = await asyncio.to_thread(live_recorder.stop_capture, project_id)
+                local_video = stop_res.get("output_path")
+                source_type = "live"
+                info["duration_sec"] = stop_res.get("duration_sec") or cap_target
+                info["low_stream_url"] = local_video
+                info["is_live"] = False
+
         dur_sec = float(info.get("duration_sec") or 0.0)
         heatmap = info.get("heatmap") or []
+        chapters = info.get("chapters") or []
         low_stream_url = info.get("low_stream_url")
         subs_url = info.get("subs_url")
         platform = info.get("platform", source_type)
@@ -70,14 +106,18 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
         with Session(engine) as session:
             proj = session.get(Project, project_id)
             if proj:
-                if proj.title in ("Nueva Transmisión", "", None) or source_type != "file":
+                if proj.title in ("Nueva Transmisión", "", None) or source_type not in ("file",):
                     proj.title = info.get("title") or title
                 proj.duration_sec = dur_sec
+                if local_video:
+                    proj.video_path = local_video
+                if source_type == "live":
+                    proj.source_type = "live"
                 proj.status = "analyzing"
                 session.add(proj)
                 session.commit()
 
-        # --- Signal Discovery Phase (Find candidate 90s windows across 0..10h) ---
+        # --- Signal Discovery Phase (Contextual 120s windows across 0..10h) ---
         candidate_windows: List[Dict[str, Any]] = []
 
         # 1. Kick VOD Chat Burst Radar (~3.5s for 10h stream!)
@@ -93,8 +133,8 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
                 min_gap_sec=180.0,
             )
             for p in peaks:
-                w_start = max(0.0, p["time_sec"] - 45.0)
-                w_dur = min(90.0, max(30.0, dur_sec - w_start))
+                w_start = max(0.0, p["time_sec"] - 55.0)
+                w_dur = min(120.0, max(30.0, dur_sec - w_start))
                 candidate_windows.append({
                     "start_sec": w_start,
                     "dur_sec": w_dur,
@@ -110,10 +150,10 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
             picked: List[float] = []
             for pt in sorted_hm:
                 t = float(pt.get("start_time", 0.0))
-                if all(abs(t - old) >= 120.0 for old in picked):
+                if all(abs(t - old) >= 130.0 for old in picked):
                     picked.append(t)
-                    w_start = max(0.0, t - 35.0)
-                    w_dur = min(90.0, max(30.0, dur_sec - w_start))
+                    w_start = max(0.0, t - 45.0)
+                    w_dur = min(120.0, max(30.0, dur_sec - w_start))
                     candidate_windows.append({
                         "start_sec": w_start,
                         "dur_sec": w_dur,
@@ -123,7 +163,7 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
                 if len(candidate_windows) >= 7:
                     break
 
-        # 3. YouTube Auto-Captions fast text path (great for podcasts/talks on YouTube)
+        # 3. YouTube Auto-Captions fast text path
         moments_from_captions: List[Dict[str, Any]] = []
         if not candidate_windows and subs_url:
             if progress_callback:
@@ -139,106 +179,141 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
                     progress_callback(60, "El Pulpo IA está detectando los mejores momentos en la transcripción...")
                 moments_from_captions = await pulpo.run("find_moments", {
                     "transcript": full_text,
-                    "signals": {"duration_sec": dur_sec, "source": "youtube_captions"},
+                    "signals": {"duration_sec": dur_sec, "source": "youtube_captions", "chapters": chapters[:10]},
                     "streamer": info.get("streamer", "Creador"),
+                    "user_context": user_context,
                 })
 
-        # 4. Distributed Window Sampling (works on ANY platform: Twitch, short videos, Kick fallback, local files)
+        # 4. Distributed Contextual Window Sampling (Twitch, live captures, local files, short videos)
         if not candidate_windows and not moments_from_captions:
-            if dur_sec <= 480:
-                # Short video (<8 min): slice sequentially into up to 4 windows covering the whole video
+            if dur_sec <= 540:
                 if progress_callback:
-                    progress_callback(28, "Preparando ventanas de audio del video...")
+                    progress_callback(28, "Preparando ventanas de audio con contexto completo...")
                 step = 110.0
                 t = 0.0
-                while t < max(1.0, dur_sec - 10.0) and len(candidate_windows) < 4:
-                    w_dur = min(115.0, dur_sec - t)
+                while t < max(1.0, dur_sec - 10.0) and len(candidate_windows) < 5:
+                    w_dur = min(120.0, dur_sec - t)
                     candidate_windows.append({
                         "start_sec": t,
                         "dur_sec": w_dur,
-                        "chat_sample": "Video completo",
-                        "radar_score": 80,
+                        "chat_sample": "Video / captura en vivo",
+                        "radar_score": 82,
                     })
                     t += step
             else:
-                # Long stream (>8 min up to 10h) without heatmap/Kick chat: sample 7 spaced 90s windows
                 if progress_callback:
-                    progress_callback(28, f"Muestreando {dur_sec/3600:.1f}h de transmisión por streaming directo...")
+                    progress_callback(28, f"Muestreando {dur_sec/3600:.1f}h de transmisión en ventanas de 2 min con contexto...")
                 n_samples = 7
                 usable_start = min(180.0, dur_sec * 0.05)
-                usable_end = max(usable_start + 90.0, dur_sec - 120.0)
+                usable_end = max(usable_start + 120.0, dur_sec - 140.0)
                 step = (usable_end - usable_start) / n_samples
                 for i in range(n_samples):
                     w_start = usable_start + i * step
                     candidate_windows.append({
                         "start_sec": w_start,
-                        "dur_sec": min(90.0, dur_sec - w_start),
-                        "chat_sample": f"Muestra estratégica #{i+1}",
-                        "radar_score": 70,
+                        "dur_sec": min(120.0, dur_sec - w_start),
+                        "chat_sample": f"Muestra contextual #{i+1}",
+                        "radar_score": 75,
                     })
 
-        # --- Multimodal Audio Listening Phase ---
+        # --- Multimodal Concurrent Audio Listening Phase (Semaphore=2 -> ~3x faster, no hangs) ---
         discovered_moments: List[Dict[str, Any]] = []
         heard_transcripts: List[str] = []
 
         if candidate_windows:
             total_w = len(candidate_windows)
-            for idx, win in enumerate(candidate_windows):
-                pct = 35 + int((idx / total_w) * 55)
+            completed_w = 0
+            sem = asyncio.Semaphore(2)
+            stream_ctx = user_context or info.get("description", "")[:240]
+
+            async def _process_one_window(idx: int, win: Dict[str, Any]):
+                nonlocal completed_w
                 h, m = divmod(int(win["start_sec"] // 60), 60)
-                if progress_callback:
-                    progress_callback(pct, f"Escuchando segmento {idx+1}/{total_w} (@{h:02d}h{m:02d}m) con El Pulpo IA...")
-
                 slice_audio = str(CACHE_DIR / f"probe_{project_id[:8]}_{idx}.m4a")
-                try:
-                    await asyncio.to_thread(
-                        ingester.extract_audio_slice,
-                        low_stream_url,
-                        win["start_sec"],
-                        win["dur_sec"],
-                        slice_audio,
-                        url if source_type != "file" else None,
-                    )
-                    res = await pulpo.run("analyze_audio_window", {
-                        "audio_path": slice_audio,
-                        "window_start_sec": win["start_sec"],
-                        "window_dur_sec": win["dur_sec"],
-                        "streamer": info.get("streamer", "Streamer"),
-                        "stream_title": info.get("title", title),
-                        "chat_sample": win["chat_sample"],
-                    })
-                    if res:
-                        off_s = float(res.get("start_offset_sec", 10.0))
-                        off_e = float(res.get("end_offset_sec", off_s + 45.0))
-                        off_s = max(0.0, min(win["dur_sec"] - 15.0, off_s))
-                        off_e = max(off_s + 15.0, min(win["dur_sec"], off_e))
-                        g_start = round(win["start_sec"] + off_s, 2)
-                        g_end = round(win["start_sec"] + off_e, 2)
+                async with sem:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                ingester.extract_audio_slice,
+                                low_stream_url,
+                                win["start_sec"],
+                                win["dur_sec"],
+                                slice_audio,
+                                url if source_type not in ("file", "live") else None,
+                            ),
+                            timeout=85.0,
+                        )
+                        res = await asyncio.wait_for(
+                            pulpo.run("analyze_audio_window", {
+                                "audio_path": slice_audio,
+                                "window_start_sec": win["start_sec"],
+                                "window_dur_sec": win["dur_sec"],
+                                "streamer": info.get("streamer", "Streamer"),
+                                "stream_title": info.get("title", title),
+                                "chat_sample": win["chat_sample"],
+                                "chapter_title": _chapter_at(chapters, win["start_sec"]),
+                                "user_context": stream_ctx,
+                            }),
+                            timeout=115.0,
+                        )
+                        return idx, win, h, m, res
+                    except Exception as win_err:
+                        print(f"[PIPELINE] Ventana {idx} falló ({win['start_sec']}s): {type(win_err).__name__}: {win_err}")
+                        return idx, win, h, m, None
+                    finally:
+                        completed_w += 1
+                        pct = 35 + int((completed_w / total_w) * 57)
+                        if progress_callback:
+                            progress_callback(pct, f"Analizadas {completed_w}/{total_w} ventanas de audio con El Pulpo IA...")
+                        if Path(slice_audio).exists():
+                            try:
+                                Path(slice_audio).unlink()
+                            except Exception:
+                                pass
 
-                        summary = res.get("transcript_summary", "")
-                        if summary:
-                            heard_transcripts.append(f"[{h:02d}:{m:02d}] {summary}")
+            if progress_callback:
+                progress_callback(35, f"Escuchando {total_w} ventanas de contexto en paralelo con El Pulpo IA...")
 
-                        discovered_moments.append({
-                            "start_sec": g_start,
-                            "end_sec": g_end,
-                            "hook": res.get("hook", "MIRA ESTO"),
-                            "title": res.get("title", "Momento del Stream"),
-                            "reason": res.get("reason", summary or "Momento destacado en vivo"),
-                            "virality_score": int(res.get("virality_score", 78)),
-                            "event_comment": res.get("event_comment"),
-                            "tags": res.get("tags", []),
-                        })
-                except Exception as win_err:
-                    print(f"[PIPELINE] Ventana {idx} falló ({win['start_sec']}s): {win_err}")
-                finally:
-                    if Path(slice_audio).exists():
-                        try:
-                            Path(slice_audio).unlink()
-                        except Exception:
-                            pass
+            win_results = await asyncio.gather(*[_process_one_window(i, w) for i, w in enumerate(candidate_windows)])
+            fallback_pool: List[Dict[str, Any]] = []
+
+            for idx, win, h, m, res in win_results:
+                if not res:
+                    continue
+                off_s = float(res.get("start_offset_sec", 12.0))
+                off_e = float(res.get("end_offset_sec", off_s + 45.0))
+                off_s = max(0.0, min(win["dur_sec"] - 15.0, off_s))
+                off_e = max(off_s + 18.0, min(win["dur_sec"], off_e))
+                g_start = round(win["start_sec"] + off_s, 2)
+                g_end = round(win["start_sec"] + off_e, 2)
+
+                summary = res.get("transcript_summary", "")
+                if summary:
+                    heard_transcripts.append(f"[{h:02d}:{m:02d}] {summary}")
+
+                entry = {
+                    "start_sec": g_start,
+                    "end_sec": g_end,
+                    "hook": res.get("hook", "Momento clave"),
+                    "title": res.get("title", "Momento del Stream"),
+                    "reason": res.get("reason", summary or "Momento destacado en directo"),
+                    "virality_score": int(res.get("virality_score", 78)),
+                    "event_comment": res.get("event_comment"),
+                    "tags": res.get("tags", []),
+                }
+                if res.get("is_viral_worthy", True):
+                    discovered_moments.append(entry)
+                else:
+                    fallback_pool.append(entry)
+
+            if not discovered_moments and fallback_pool:
+                fallback_pool.sort(key=lambda x: x["virality_score"], reverse=True)
+                discovered_moments = fallback_pool[:3]
         elif moments_from_captions:
             discovered_moments = moments_from_captions
+
+        if progress_callback:
+            progress_callback(96, "Guardando momentos y contexto en base de datos...")
 
         # Persist Moments & Transcript into SQLite
         saved_count = 0
@@ -347,10 +422,13 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
     stream_title = proj.title or ""
 
     try:
-        if source_type == "file" and local_video and Path(local_video).exists():
+        if source_type in ("file", "live") and local_video and Path(local_video).exists():
             if progress_callback:
-                progress_callback(15, f"Cortando segmento de {round(duration)}s del archivo local...")
-            slice_path = str(MEDIA_DIR / f"slice_{clip_id[:8]}.mp4")
+                progress_callback(15, f"Cortando segmento HD de {round(duration)}s de la grabación local...")
+            slice_ext = Path(local_video).suffix.lower() or ".mp4"
+            if slice_ext not in (".mp4", ".ts", ".mkv", ".mov"):
+                slice_ext = ".mp4"
+            slice_path = str(MEDIA_DIR / f"slice_{clip_id[:8]}{slice_ext}")
             cmd = [
                 FFMPEG_PATH, "-y", "-hide_banner", "-loglevel", "error",
                 "-ss", str(round(start_sec, 2)), "-t", str(round(duration, 2)),

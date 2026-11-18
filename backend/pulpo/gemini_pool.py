@@ -141,7 +141,7 @@ class GeminiPool:
                 payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
 
             start_t = time.time()
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(32.0, connect=10.0)) as client:
                 try:
                     res = await client.post(url, json=payload)
                     latency = int((time.time() - start_t) * 1000)
@@ -191,10 +191,10 @@ class GeminiPool:
                         await asyncio.sleep(1.0)
 
                 except Exception as e:
-                    print(f"[PULPO EXCEPTION] Key {key[:10]} ({model}): {str(e)}")
+                    print(f"[PULPO EXCEPTION] Key {key[:10]} ({model}): {type(e).__name__}: {str(e)}")
                     attempts += 1
                     model_idx += 1
-                    await asyncio.sleep(0.8)
+                    await asyncio.sleep(0.5)
 
         raise RuntimeError(f"Fallo en Pulpo Gemini tras {max_retries} reintentos en el pool de llaves.")
 

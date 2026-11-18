@@ -74,10 +74,12 @@ class PulpoRouter:
         """Listens directly to a real audio chunk (.m4a) via Gemini Multimodal Audio."""
         audio_path = payload["audio_path"]
         window_start_sec = float(payload.get("window_start_sec", 0.0))
-        window_dur_sec = float(payload.get("window_dur_sec", 90.0))
+        window_dur_sec = float(payload.get("window_dur_sec", 120.0))
         streamer = payload.get("streamer", "Streamer")
         title = payload.get("stream_title", "")
         chat_sample = payload.get("chat_sample", "")
+        chapter_title = payload.get("chapter_title", "")
+        user_context = payload.get("user_context", "")
 
         with open(audio_path, "rb") as f:
             b64_audio = base64.b64encode(f.read()).decode("utf-8")
@@ -87,34 +89,41 @@ class PulpoRouter:
 
         system_instruction = (
             "Eres un editor profesional de clips cortos en español para redes (TikTok, Instagram Reels, Shorts). "
-            "Escribes títulos limpios, naturales y atractivos, sin gritar todo en mayúsculas ni usar clickbait sucio. "
-            "Solo usas 1 emoji ocasionalmente si aporta emoción natural; muchos títulos funcionan mejor sin emoji. "
+            "Priorizas comprensión del contexto real: nunca cortas un chiste o debate a mitad sin su planteamiento previo. "
+            "Escribes títulos limpios y atractivos, y explicas claramente qué ocurre en el clip para quien no vio el directo. "
             "Responde SIEMPRE en español y estrictamente en formato JSON válido."
         )
 
+        context_lines = [f'Stream: "{title}" — Creador: {streamer}']
+        if chapter_title:
+            context_lines.append(f"Capítulo / Juego / Sección en este instante: {chapter_title}")
+        if user_context:
+            context_lines.append(f"Enfoque pedido por el editor: {user_context}")
+        context_block = "\n".join(context_lines)
+
         prompt = f"""
-Stream: "{title}" — Creador: {streamer}
-Este fragmento dura {window_dur_sec:.0f} segundos (el segundo 0.0 del audio corresponde al segundo {window_start_sec:.0f} del stream completo).
-Mensajes del chat en este tramo: {chat_sample}
+{context_block}
+Este audio dura {window_dur_sec:.0f} segundos (el segundo 0.0 corresponde al segundo {window_start_sec:.0f} del stream; los primeros ~20s sirven para entender el contexto previo).
+Referencia de chat / radar: {chat_sample}
 
 Escucha el audio real con atención:
-1. Identifica el momento de mayor interés o gracia y define el corte exacto en una pausa o inicio claro de frase (`start_offset_sec` y `end_offset_sec`, duración entre 20 y 65 segundos).
-2. Redacta un título editorial limpio (sin todo en mayúsculas ni signos repetidos como `!!!`, y con máximo 1 emoji SOLO si realmente encaja; déjalo sin emoji si se lee más elegante).
-3. Redacta un gancho corto de pantalla (`hook`, máximo 5 palabras claras).
-4. En `reason`, explica en 2 frases claras y con sentido **quién habla, qué está pasando y por qué vale la pena el clip** para alguien que no vio el directo.
-5. En `event_comment`, escribe un apunte breve y natural de contexto (sin corchetes ni barras raras).
+1. Localiza el momento con mayor punch, gracia, anécdota o clímax completo (incluyendo el planteamiento previo necesario para que se entienda solo) entre 22 y 65 segundos (`start_offset_sec` y `end_offset_sec`). Si es puro silencio o relleno sin interés, marca `"is_viral_worthy": false`.
+2. Redacta un título limpio (<=52 caracteres, sin gritar todo en mayúsculas ni spam de signos, máximo 1 emoji opcional solo si aporta).
+3. Redacta un gancho breve para pantalla (`hook`, 3 a 6 palabras que den contexto o intriga real).
+4. En `reason`, explica en **2 a 3 frases claras y autosuficientes**: (a) qué estaba pasando o de qué hablaban antes, (b) qué dice o sucede exactamente en el clip, y (c) por qué atrapa al espectador.
+5. En `event_comment`, escribe una nota breve de contexto en pantalla (sin corchetes).
 
 Devuelve un JSON dict exacto con:
 - "is_viral_worthy": boolean
 - "start_offset_sec": float
 - "end_offset_sec": float
-- "title": string (máximo 52 caracteres, ortografía natural en español)
-- "hook": string (3 a 5 palabras claras para el encabezado en pantalla)
-- "reason": string (explicación coherente y completa del contexto del clip)
-- "virality_score": int (60 a 99)
-- "event_comment": string (comentario corto de contexto sin corchetes, opcionalmente 1 emoji si aporta)
+- "title": string
+- "hook": string
+- "reason": string
+- "virality_score": int (55 a 99)
+- "event_comment": string
 - "tags": list de strings
-- "transcript_summary": string (resumen fiel de lo que se escucha)
+- "transcript_summary": string (resumen fiel de lo escuchado)
 """
         media_parts = [{"inlineData": {"mimeType": mime_type, "data": b64_audio}}]
         res = await gemini_pool.generate_json(
@@ -202,25 +211,27 @@ Notas:
         transcript_text = payload.get("transcript", "")
         signals = payload.get("signals", {})
         streamer_name = payload.get("streamer", "Streamer")
+        user_context = payload.get("user_context", "")
 
         system_instruction = (
-            "Eres un editor profesional de clips en español. Títulos naturales sin exceso de mayúsculas, "
-            "explicación clara del contexto y emojis solo de vez en cuando cuando sumen. Responde en JSON array."
+            "Eres un editor profesional de clips en español. Priorizas contexto completo, "
+            "explicación clara de qué ocurre y títulos naturales sin abuso de mayúsculas. Responde en JSON array."
         )
         prompt = f"""
 Streamer: {streamer_name}
+Contexto editorial adicional: {user_context or "Ninguno"}
 Señales detectadas:
 {json.dumps(signals, ensure_ascii=False, indent=2)}
 
 Transcripción con marcas de tiempo:
 {transcript_text[:25000]}
 
-Extrae entre 4 y 10 momentos reales (18 a 75 segundos) con:
+Extrae entre 4 y 10 momentos reales (22 a 75 segundos, incluyendo planteamiento previo completo) con:
 - "start_sec": float
 - "end_sec": float
-- "hook": string (3 a 5 palabras claras)
+- "hook": string (3 a 6 palabras claras de gancho)
 - "title": string (título natural <=52 caracteres, máx 1 emoji opcional)
-- "reason": string (explicación de 2 frases claras de lo que ocurre)
+- "reason": string (explicación de 2 a 3 frases claras sobre qué precedió al momento, qué se dice/hace y por qué engancha)
 - "virality_score": int (60-99)
 - "event_comment": string (nota breve sin corchetes)
 - "tags": list[str]

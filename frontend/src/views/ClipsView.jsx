@@ -390,9 +390,9 @@ export default function ClipsView({ selectedProject, setTab, onSelectClipForPubl
                       </div>
 
                       <div className="p-5 space-y-4">
-                        <div className="space-y-1">
-                          <h3 className="font-display font-semibold text-sm text-white line-clamp-1">{m.title}</h3>
-                          <p className="text-xs text-neutral-400 line-clamp-3 leading-relaxed">{m.reason}</p>
+                        <div className="space-y-1.5">
+                          <h3 className="font-display font-semibold text-sm text-white">{m.title}</h3>
+                          <p className="text-xs text-neutral-300 leading-relaxed">{m.reason}</p>
                         </div>
 
                         <button

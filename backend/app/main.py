@@ -41,6 +41,7 @@ from app.jobs import (
 )
 from pulpo import pulpo, gemini_pool
 from clipper.pipeline import process_project_pipeline, render_single_clip_job
+from ingest.live_recorder import live_recorder
 from studio.generator import render_studio_video_job
 from publisher.uploaders.meta import meta_publisher
 from publisher.uploaders.tiktok import tiktok_publisher
@@ -149,6 +150,7 @@ class CreateProjectPayload(BaseModel):
     url: str
     title: Optional[str] = "Nueva Transmisión"
     source_type: Optional[str] = "youtube"
+    context_hint: Optional[str] = None
 
 
 @app.post("/projects", response_model=Project)
@@ -157,6 +159,7 @@ def create_project(payload: CreateProjectPayload, session: Session = Depends(get
         title=payload.title or "Nueva Transmisión",
         source_url=payload.url,
         source_type=payload.source_type,
+        context_hint=payload.context_hint,
         status="pending",
     )
     session.add(proj)
@@ -169,6 +172,7 @@ def create_project(payload: CreateProjectPayload, session: Session = Depends(get
 async def upload_local_project(
     file: UploadFile = File(...),
     title: str = Form("Video Local"),
+    context_hint: str = Form(""),
     session: Session = Depends(get_session),
 ):
     safe_name = f"local_{os.urandom(4).hex()}_{Path(file.filename).name}"
@@ -181,12 +185,87 @@ async def upload_local_project(
         source_type="file",
         source_url=str(dest),
         video_path=str(dest),
+        context_hint=context_hint.strip() or None,
         status="pending",
     )
     session.add(proj)
     session.commit()
     session.refresh(proj)
     return proj
+
+
+class LiveStartPayload(BaseModel):
+    url: str
+    title: Optional[str] = ""
+    context_hint: Optional[str] = None
+    max_duration_sec: int = 600
+
+
+@app.post("/live/start")
+async def start_live_capture_endpoint(payload: LiveStartPayload, session: Session = Depends(get_session)):
+    proj = Project(
+        title=(payload.title or "").strip() or "Directo EN VIVO",
+        source_url=payload.url.strip(),
+        source_type="live",
+        context_hint=(payload.context_hint or "").strip() or None,
+        status="recording",
+    )
+    session.add(proj)
+    session.commit()
+    session.refresh(proj)
+
+    try:
+        st = await asyncio.to_thread(live_recorder.start_capture, proj.id, payload.url.strip(), payload.max_duration_sec)
+        if not (payload.title or "").strip() and st.get("title"):
+            proj.title = f"🔴 {st['title']}"
+        proj.video_path = st.get("output_path")
+        session.add(proj)
+        session.commit()
+        session.refresh(proj)
+        return {"project": proj, "live": st}
+    except Exception as exc:
+        session.delete(proj)
+        session.commit()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/live/{project_id}/status")
+def get_live_capture_status(project_id: str, session: Session = Depends(get_session)):
+    proj = session.get(Project, project_id)
+    if not proj:
+        raise HTTPException(status_code=404, detail="Proyecto en vivo no encontrado")
+    st = live_recorder.get_status(project_id)
+    st["project_status"] = proj.status
+    st["duration_sec"] = proj.duration_sec
+    return st
+
+
+@app.post("/live/{project_id}/stop-and-analyze")
+async def stop_live_and_analyze(project_id: str, session: Session = Depends(get_session)):
+    proj = session.get(Project, project_id)
+    if not proj:
+        raise HTTPException(status_code=404, detail="Proyecto en vivo no encontrado")
+
+    stop_res = await asyncio.to_thread(live_recorder.stop_capture, project_id)
+    if stop_res.get("output_path"):
+        proj.video_path = stop_res["output_path"]
+    if stop_res.get("duration_sec"):
+        proj.duration_sec = float(stop_res["duration_sec"])
+    proj.status = "pending"
+    session.add(proj)
+    session.commit()
+    session.refresh(proj)
+
+    if not proj.video_path or not Path(proj.video_path).exists():
+        raise HTTPException(status_code=400, detail="No hay grabación capturada todavía para analizar.")
+
+    async def _task(job_id: str):
+        def cb(progress: int, msg: str):
+            update_job_status(job_id, status="running", progress=progress, message=msg)
+        return await process_project_pipeline(job_id, project_id, progress_callback=cb)
+
+    job = enqueue_job(job_type="analyze", target_id=project_id, task_func=_task)
+    return {"project": proj, "job_id": job.id, "duration_sec": proj.duration_sec}
 
 
 @app.get("/projects", response_model=List[Project])
@@ -207,6 +286,12 @@ def delete_project(project_id: str, session: Session = Depends(get_session)):
     proj = session.get(Project, project_id)
     if not proj:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+    live_recorder.stop_capture(project_id)
+    if proj.video_path and Path(proj.video_path).exists():
+        try:
+            Path(proj.video_path).unlink()
+        except Exception:
+            pass
     for m in session.exec(select(Moment).where(Moment.project_id == project_id)).all():
         session.delete(m)
     for c in session.exec(select(Clip).where(Clip.project_id == project_id)).all():

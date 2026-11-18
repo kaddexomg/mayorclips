@@ -25,8 +25,9 @@ def init_db():
     )
     SQLModel.metadata.create_all(engine)
 
-    # Safe SQLite migration for new Clip control columns
+    # Safe SQLite migration for new Project & Clip control columns
     migrations = [
+        ("projects", "context_hint", "TEXT"),
         ("clips", "content_mode", "TEXT DEFAULT 'auto'"),
         ("clips", "hook_persistence", "TEXT DEFAULT 'intro'"),
         ("clips", "show_subtitles", "BOOLEAN DEFAULT 1"),
@@ -40,6 +41,24 @@ def init_db():
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
             except Exception as e:
                 print(f"[DB MIGRATION] Skipped {table}.{col}: {e}")
+
+        # Clean up zombie jobs left in running/queued state after an unexpected server restart
+        try:
+            conn.execute(
+                text(
+                    "UPDATE jobs SET status='failed', message='Interrumpido por reinicio del servidor', "
+                    "error_message='El servidor se reinició mientras este trabajo estaba en ejecución.' "
+                    "WHERE status IN ('running', 'queued')"
+                )
+            )
+            conn.execute(
+                text(
+                    "UPDATE projects SET status='error', error_message='Captura o análisis interrumpido por reinicio.' "
+                    "WHERE status IN ('recording', 'analyzing')"
+                )
+            )
+        except Exception:
+            pass
 
 def get_session():
     with Session(engine) as session:

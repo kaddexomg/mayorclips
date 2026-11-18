@@ -14,9 +14,10 @@ class Project(SQLModel, table=True):
 
     id: str = Field(default_factory=gen_uuid, primary_key=True)
     title: str = Field(index=True)
-    source_type: str = Field(default="youtube", index=True) # twitch, kick, youtube, file, faceless
+    source_type: str = Field(default="youtube", index=True) # twitch, kick, youtube, live, file, faceless
     source_url: Optional[str] = Field(default=None)
-    status: str = Field(default="pending", index=True) # pending, ingesting, analyzing, ready, error
+    context_hint: Optional[str] = Field(default=None)
+    status: str = Field(default="pending", index=True) # pending, recording, ingesting, analyzing, ready, error
     duration_sec: float = Field(default=0.0)
     audio_path: Optional[str] = Field(default=None)
     video_path: Optional[str] = Field(default=None)

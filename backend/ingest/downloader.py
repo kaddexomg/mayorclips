@@ -19,10 +19,12 @@ class VideoIngester:
             "quiet": True,
             "skip_download": True,
             "no_warnings": True,
+            "socket_timeout": 20,
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
+        is_live = bool(info.get("is_live") or info.get("live_status") == "is_live")
         duration = float(info.get("duration") or 0.0)
         title = info.get("title") or "Stream Sin Título"
         uploader = info.get("uploader") or info.get("channel") or "Streamer"
@@ -30,17 +32,30 @@ class VideoIngester:
         extractor = (info.get("extractor_key") or "generic").lower()
         formats = info.get("formats") or []
 
-        # Pick lowest bandwidth stream containing audio for fast 0-bloat analysis (e.g. Kick 160p or ba)
+        # Pick lowest & highest audio-only streams (handles YouTube Live HLS where acodec=None but audio_ext/resolution='audio only')
         low_stream_url = None
-        audio_only = [f for f in formats if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none") and f.get("url")]
+        best_audio_url = None
+        audio_only = [
+            f for f in formats
+            if f.get("url")
+            and f.get("vcodec") in (None, "none")
+            and (
+                f.get("acodec") not in (None, "none")
+                or f.get("audio_ext") not in (None, "none")
+                or f.get("resolution") == "audio only"
+            )
+            and f.get("ext") not in ("mhtml", "jpg", "png", "webp")
+        ]
         if audio_only:
-            audio_only.sort(key=lambda f: f.get("tbr") or 9999)
+            audio_only.sort(key=lambda f: f.get("tbr") or (0 if "low" in (f.get("format") or "").lower() else 999))
             low_stream_url = audio_only[0]["url"]
+            best_audio_url = audio_only[-1]["url"]
         else:
             muxed_with_audio = [f for f in formats if f.get("acodec") not in (None, "none") and f.get("url")]
             if muxed_with_audio:
                 muxed_with_audio.sort(key=lambda f: f.get("tbr") or 9999)
                 low_stream_url = muxed_with_audio[0]["url"]
+                best_audio_url = muxed_with_audio[-1]["url"]
 
         # Pick best <=1080p muxed HLS/MP4 stream if available (ideal for Kick/Twitch direct FFmpeg slice)
         hq_muxed_url = None
@@ -54,6 +69,19 @@ class VideoIngester:
         if muxed_hq:
             muxed_hq.sort(key=lambda f: (f.get("height") or 0, f.get("tbr") or 0), reverse=True)
             hq_muxed_url = muxed_hq[0]["url"]
+
+        # Best <=1080p video stream (needed for YouTube Live split HLS where muxed_hq is empty)
+        hq_video_url = hq_muxed_url
+        if not hq_video_url:
+            vid_hq = [
+                f for f in formats
+                if f.get("vcodec") not in (None, "none")
+                and (f.get("height") or 0) <= 1080
+                and f.get("url")
+            ]
+            if vid_hq:
+                vid_hq.sort(key=lambda f: (f.get("height") or 0, f.get("tbr") or 0), reverse=True)
+                hq_video_url = vid_hq[0]["url"]
 
         # Check YouTube auto-captions / subtitles in Spanish or English
         subs_url = None
@@ -71,8 +99,10 @@ class VideoIngester:
         return {
             "id": info.get("id"),
             "title": title,
+            "is_live": is_live,
             "duration_sec": duration,
             "streamer": uploader,
+            "description": (info.get("description") or "")[:500],
             "channel_id": info.get("channel_id"),
             "timestamp": info.get("timestamp"),
             "thumbnail": thumbnail,
@@ -80,7 +110,9 @@ class VideoIngester:
             "heatmap": info.get("heatmap") or [],
             "chapters": info.get("chapters") or [],
             "low_stream_url": low_stream_url,
+            "best_audio_url": best_audio_url,
             "hq_muxed_url": hq_muxed_url,
+            "hq_video_url": hq_video_url,
             "subs_url": subs_url,
             "url": url,
         }
@@ -136,7 +168,7 @@ class VideoIngester:
             if proc.returncode == 0 and Path(output_path).exists() and Path(output_path).stat().st_size > 1000:
                 return output_path
 
-        # Fallback to yt-dlp section download if direct stream seek failed
+        # Fallback to yt-dlp section download if direct stream seek failed (never hang on live streams)
         if fallback_page_url:
             end_sec = start_sec + duration_sec
             opts = {
@@ -145,6 +177,7 @@ class VideoIngester:
                 "ffmpeg_location": self.ffmpeg_location,
                 "download_ranges": yt_dlp.utils.download_range_func(None, [(max(0.0, start_sec), end_sec)]),
                 "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a", "preferredquality": "64"}],
+                "socket_timeout": 20,
                 "quiet": True,
                 "no_warnings": True,
             }
