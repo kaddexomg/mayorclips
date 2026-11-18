@@ -252,6 +252,10 @@ class CreateClipPayload(BaseModel):
     start_sec: float
     end_sec: float
     layout: Optional[str] = "auto"
+    content_mode: Optional[str] = "auto"
+    hook_persistence: Optional[str] = "intro"
+    show_subtitles: Optional[bool] = True
+    video_transitions: Optional[bool] = True
     subtitle_style: Optional[str] = "hormozi"
 
 
@@ -268,6 +272,10 @@ def create_clip(payload: CreateClipPayload, session: Session = Depends(get_sessi
         end_sec=payload.end_sec,
         duration_sec=dur,
         layout=payload.layout or "auto",
+        content_mode=payload.content_mode or "auto",
+        hook_persistence=payload.hook_persistence or "intro",
+        show_subtitles=True if payload.show_subtitles is None else payload.show_subtitles,
+        video_transitions=True if payload.video_transitions is None else payload.video_transitions,
         subtitle_style=payload.subtitle_style or "hormozi",
         status="draft",
     )
@@ -299,6 +307,10 @@ class UpdateClipPayload(BaseModel):
     hook_text: Optional[str] = None
     event_comment: Optional[str] = None
     layout: Optional[str] = None
+    content_mode: Optional[str] = None
+    hook_persistence: Optional[str] = None
+    show_subtitles: Optional[bool] = None
+    video_transitions: Optional[bool] = None
     subtitle_style: Optional[str] = None
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
@@ -313,6 +325,10 @@ def update_clip(clip_id: str, payload: UpdateClipPayload, session: Session = Dep
     if payload.hook_text is not None: clip.hook_text = payload.hook_text
     if payload.event_comment is not None: clip.event_comment = payload.event_comment
     if payload.layout is not None: clip.layout = payload.layout
+    if payload.content_mode is not None: clip.content_mode = payload.content_mode
+    if payload.hook_persistence is not None: clip.hook_persistence = payload.hook_persistence
+    if payload.show_subtitles is not None: clip.show_subtitles = payload.show_subtitles
+    if payload.video_transitions is not None: clip.video_transitions = payload.video_transitions
     if payload.subtitle_style is not None: clip.subtitle_style = payload.subtitle_style
     if payload.start_sec is not None: clip.start_sec = payload.start_sec
     if payload.end_sec is not None: clip.end_sec = payload.end_sec
@@ -361,6 +377,14 @@ class CreateStudioPayload(BaseModel):
     voice_name: Optional[str] = "es-MX-DaliaNeural"
 
 
+def _studio_with_urls(sv: StudioVideo) -> Dict[str, Any]:
+    d = sv.model_dump()
+    d["video_url"] = f"/renders/{Path(sv.output_path).name}" if sv.output_path and Path(sv.output_path).exists() else None
+    hf_dir = STORAGE_DIR / "studio_hf" / sv.id
+    d["hf_project_dir"] = str(hf_dir) if (hf_dir / "index.html").exists() else None
+    return d
+
+
 @app.post("/studio")
 async def create_studio_video(payload: CreateStudioPayload, session: Session = Depends(get_session)):
     script = await pulpo.run("script", {"topic": payload.topic, "style": payload.style})
@@ -378,9 +402,7 @@ async def create_studio_video(payload: CreateStudioPayload, session: Session = D
     session.add(studio_item)
     session.commit()
     session.refresh(studio_item)
-    d = studio_item.model_dump()
-    d["video_url"] = None
-    return d
+    return _studio_with_urls(studio_item)
 
 
 @app.post("/studio/{studio_id}/render")
@@ -401,12 +423,7 @@ async def trigger_studio_render(studio_id: str, session: Session = Depends(get_s
 @app.get("/studio")
 def list_studio_videos(session: Session = Depends(get_session)):
     items = session.exec(select(StudioVideo).order_by(StudioVideo.created_at.desc())).all()
-    out = []
-    for sv in items:
-        d = sv.model_dump()
-        d["video_url"] = f"/renders/{Path(sv.output_path).name}" if sv.output_path and Path(sv.output_path).exists() else None
-        out.append(d)
-    return out
+    return [_studio_with_urls(sv) for sv in items]
 
 
 # --- Social Accounts & Real OAuth ---

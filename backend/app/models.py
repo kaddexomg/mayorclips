@@ -63,7 +63,11 @@ class Clip(SQLModel, table=True):
     title: str = Field(default="Nuevo Clip")
     hook_text: str = Field(default="")
     event_comment: Optional[str] = Field(default=None)
-    layout: str = Field(default="split_screen") # split_screen, centered_face, blur_bg, podcast
+    layout: str = Field(default="auto") # auto, duo_split, speaker_focus, split_screen, centered_face, blur_bg, gaming_zoom
+    content_mode: str = Field(default="auto") # auto, gaming_gta, podcast, reaction
+    hook_persistence: str = Field(default="intro") # intro (0-4.5s), always (todo el clip), off
+    show_subtitles: bool = Field(default=True)
+    video_transitions: bool = Field(default=True)
     subtitle_style: str = Field(default="hormozi") # hormozi, karaoke, neon, minimal, mrbeast
     aspect_ratio: str = Field(default="9:16")
     start_sec: float = Field(default=0.0)

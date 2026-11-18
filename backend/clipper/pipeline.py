@@ -329,6 +329,10 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
         start_sec = float(clip.start_sec)
         end_sec = float(clip.end_sec)
         layout = clip.layout
+        content_mode = getattr(clip, "content_mode", "auto") or "auto"
+        hook_persistence = getattr(clip, "hook_persistence", "intro") or "intro"
+        show_subtitles = getattr(clip, "show_subtitles", True)
+        video_transitions = getattr(clip, "video_transitions", True)
         sub_style = clip.subtitle_style
         hook_text = clip.hook_text or clip.title
         event_comment = clip.event_comment or ""
@@ -370,26 +374,41 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
 
         # 2. Gemini Vision scene classification + OpenCV YuNet active-speaker tracking
         if progress_callback:
-            progress_callback(40, "Analizando rostros y seguimiento de hablante activo...")
+            progress_callback(40, "Analizando rostros, acción y seguimiento de cámara...")
         webcam_box = None
+        roi_box = None
         vision = {}
         extracted_jpg = await asyncio.to_thread(extract_frame_jpeg, slice_path, frame_jpg, min(2.0, duration / 2))
         if extracted_jpg:
             vision = await pulpo.run("detect_facecam", {"image_path": extracted_jpg})
             webcam_box = vision.get("webcam_box")
+            roi_box = vision.get("roi_box")
 
         track_data = await asyncio.to_thread(analyze_speakers_and_motion, slice_path, 3.0)
         speakers = track_data.get("speakers", [])
         timeline_segments = track_data.get("timeline_segments", [])
 
-        # Resolve intelligent layout if auto or legacy split_screen fallback
+        # Resolve intelligent layout factoring content_mode (gaming_gta, podcast, etc.)
         if layout in ("auto", "", None):
-            if vision.get("has_important_bottom_graphic") and len(speakers) >= 2:
+            if content_mode == "gaming_gta":
+                layout = "split_screen" if (vision.get("has_facecam") and webcam_box) else "gaming_zoom"
+            elif content_mode == "podcast":
+                if len(speakers) >= 2 and not vision.get("has_important_bottom_graphic"):
+                    layout = "duo_split"
+                elif len(speakers) >= 2:
+                    layout = "speaker_focus"
+                elif len(speakers) == 1:
+                    layout = "centered_face"
+                else:
+                    layout = "blur_bg"
+            elif vision.get("has_important_bottom_graphic") and len(speakers) >= 2:
                 layout = "speaker_focus"
             elif vision.get("scene_type") == "two_person_split" and len(speakers) >= 2:
                 layout = "duo_split"
             elif vision.get("has_facecam") and vision.get("scene_type") == "facecam_gameplay":
                 layout = "split_screen"
+            elif vision.get("scene_type") == "gaming_action":
+                layout = "gaming_zoom"
             elif len(speakers) >= 2 and vision.get("scene_type") == "multi_panel":
                 layout = "speaker_focus"
             else:
@@ -402,36 +421,43 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
             else:
                 layout = vision.get("layout_recommended", "blur_bg")
 
-        # 3. Whisper base transcription + Gemini LATAM slang polishing
-        if progress_callback:
-            progress_callback(56, "Transcribiendo audio con Whisper Base y corrigiendo jerga...")
-        words = await asyncio.to_thread(transcribe_clip_words, slice_path, "es")
-        if words:
-            words = await polish_words_with_pulpo(words, context=f"{stream_title} | {clip.title}")
-        else:
-            words = [{"word": w, "start_sec": round(i * 0.4, 2), "end_sec": round((i + 1) * 0.4, 2)} for i, w in enumerate(hook_text.split()[:6])]
+        # 3. Whisper base transcription + Gemini LATAM slang polishing (only when subtitles enabled)
+        words = []
+        ass_arg = None
+        if show_subtitles:
+            if progress_callback:
+                progress_callback(56, "Transcribiendo audio con Whisper Base y corrigiendo jerga...")
+            words = await asyncio.to_thread(transcribe_clip_words, slice_path, "es")
+            if words:
+                words = await polish_words_with_pulpo(words, context=f"{stream_title} | {clip.title}")
+            else:
+                words = [{"word": w, "start_sec": round(i * 0.4, 2), "end_sec": round((i + 1) * 0.4, 2)} for i, w in enumerate(hook_text.split()[:6])]
 
-        # Place subtitles cleanly in safe zone depending on layout
-        margin_v = 920 if layout in ("duo_split", "speaker_focus") else (340 if layout == "centered_face" else 440)
-        await asyncio.to_thread(
-            generate_ass_file, words, ass_path, style_name=sub_style, margin_v_override=margin_v
-        )
+            # Place subtitles cleanly in safe zone depending on layout
+            margin_v = 920 if layout in ("duo_split", "speaker_focus") else (340 if layout == "centered_face" else 420)
+            await asyncio.to_thread(
+                generate_ass_file, words, ass_path, style_name=sub_style, margin_v_override=margin_v
+            )
+            ass_arg = ass_path
 
-        # 4. Graphic PNG overlays with full-color emojis (no ugly [brackets]!)
-        title_y = 125 if layout in ("duo_split", "speaker_focus") else 210
-        hook_png = await asyncio.to_thread(
-            render_pill_overlay_png, hook_text, hook_png_path, y_center=title_y, font_size=44
-        )
+        # 4. Graphic PNG overlays with full-color emojis & hook_persistence support
+        title_y = 125 if layout in ("duo_split", "speaker_focus") else 195
+        hook_png = None
+        if hook_persistence != "off":
+            hook_png = await asyncio.to_thread(
+                render_pill_overlay_png, hook_text, hook_png_path, y_center=title_y, font_size=44
+            )
         card_png = None
         if event_comment and event_comment.strip() and event_comment.strip().lower() != hook_text.strip().lower():
+            card_y = (title_y + 150) if (hook_persistence == "always" and hook_png) else title_y
             card_png = await asyncio.to_thread(
-                render_pill_overlay_png, event_comment, card_png_path, y_center=title_y, font_size=36,
+                render_pill_overlay_png, event_comment, card_png_path, y_center=card_y, font_size=36,
                 bg_rgba=(20, 36, 43, 230), border_rgba=(255, 255, 255, 80)
             )
 
-        # 5. Hardware-accelerated render + subtle SFX
+        # 5. Hardware-accelerated render + transitions + subtle SFX
         if progress_callback:
-            progress_callback(78, f"Renderizando 9:16 ({layout}) con subtítulos y SFX...")
+            progress_callback(78, f"Renderizando 9:16 ({layout}) con transiciones y SFX...")
         out_mp4 = f"clip_{clip_id[:8]}_vertical.mp4"
         render_res = await asyncio.to_thread(
             render_vertical_clip,
@@ -440,13 +466,16 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
             layout,
             0.0,
             duration,
-            ass_path,
+            ass_arg,
             webcam_box,
             speakers,
             timeline_segments,
             hook_png,
             card_png,
             True,
+            hook_persistence,
+            video_transitions,
+            roi_box,
         )
 
         with Session(engine) as session:

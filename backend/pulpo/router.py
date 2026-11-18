@@ -158,24 +158,28 @@ Si una palabra ya está bien escrita, NO la incluyas.
         with open(image_path, "rb") as f:
             b64_img = base64.b64encode(f.read()).decode("utf-8")
 
-        system_instruction = "Eres un director de fotografía que analiza encuadres de streams 16:9."
+        system_instruction = "Eres un director de fotografía que analiza encuadres de streams 16:9 (podcasts, gameplay tipo GTA 6, reacciones y tutoriales)."
         prompt = """
 Analiza este fotograma del video (coordenadas normalizadas 0.0 a 1.0 en X y Y).
 Clasifica el tipo de escena:
 - "two_person_split": hay 2 personas principales hablando lado a lado (podcast/entrevista/debate de 2 cámaras)
 - "multi_panel": hay 3 o más recuadros de personas hablando (mesa de debate/show) y/o pizarra abajo
 - "facecam_gameplay": 1 recuadro pequeño de cámara del streamer superpuesto sobre un videojuego/pantalla
+- "gaming_action": pantalla completa de videojuego (ej. GTA 6, meme en escena, NPC, accidente o detalle visual clave) sin facecam o donde la acción del juego es lo más importante
 - "single_speaker": 1 persona ocupando toda la toma hablando a cámara
-- "blur_bg": pantalla completa con gráficas, partido o texto donde no conviene recortar
+- "blur_bg": pantalla completa con gráficas, partido o código donde no conviene recortar
 
 Devuelve un JSON dict exacto:
 {
-  "scene_type": "two_person_split" | "multi_panel" | "facecam_gameplay" | "single_speaker" | "blur_bg",
+  "scene_type": "two_person_split" | "multi_panel" | "facecam_gameplay" | "gaming_action" | "single_speaker" | "blur_bg",
   "has_facecam": boolean,
   "has_important_bottom_graphic": boolean,
-  "layout_recommended": "duo_split" | "speaker_focus" | "split_screen" | "centered_face" | "blur_bg",
-  "webcam_box": {"x": float, "y": float, "w": float, "h": float}
+  "layout_recommended": "duo_split" | "speaker_focus" | "split_screen" | "gaming_zoom" | "centered_face" | "blur_bg",
+  "webcam_box": {"x": float, "y": float, "w": float, "h": float},
+  "roi_box": {"x": float, "y": float, "w": float, "h": float}
 }
+Notas:
+- `roi_box` marca la zona de interés principal dentro del video/gameplay (ej. el personaje, vehículo, texto de meme o suceso gracioso en GTA 6). Si todo el cuadro importa, usa {"x": 0.15, "y": 0.1, "w": 0.7, "h": 0.8}.
 """
         media_parts = [{"inlineData": {"mimeType": "image/jpeg", "data": b64_img}}]
         try:
@@ -248,33 +252,47 @@ Genera un JSON dict con:
     async def _generate_script(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         topic = payload.get("topic", "")
         style = payload.get("style", "curiosities")
+        style_notes = {
+            "explainer": "Estilo explicativo técnico / motion graphics estilo código y arquitectura: directo, pasos claros, cifras concretas o bloques lógicos.",
+            "gaming_lore": "Estilo GTA 6 / lore & memes gaming: narración inmersiva, datos ocultos, detalles curiosos y remate épico.",
+            "curiosities": "Estilo curiosidades virales rápidas con datos sorprendentes.",
+            "top5": "Formato Top dinámico con ritmo ascendente y datos claros.",
+            "history": "Narrativa de historia / misterio con giro final atrapante.",
+            "data_charts": "Enfoque en estadísticas, porcentajes y métricas impactantes.",
+        }.get(style, "Ritmo ágil con gancho fuerte en los primeros 3 segundos.")
+
         system_instruction = (
-            "Eres un guionista de videos cortos en español con ritmo ágil (30 a 50 segundos)."
+            "Eres un guionista y director creativo de videos cortos verticales en español (28 a 42 segundos, 3 a 4 escenas claras)."
         )
         prompt = f"""
 Tema: {topic}
-Estilo: {style}
+Estilo: {style} ({style_notes})
 
-Devuelve JSON dict con:
-- "title": string
-- "hook": string (primeros 3s hablados)
-- "scenes": lista de escenas con {{scene_id, spoken_text, visual_cue, keyword_highlight, estimated_sec}}
+Devuelve JSON dict exacto con:
+- "title": string corto (puede llevar 1 emoji al final si aporta valor)
+- "hook": string (primeros 3s hablados de alto impacto)
+- "scenes": lista de 3 a 4 escenas con {{scene_id, spoken_text, visual_cue, keyword_highlight, estimated_sec}}
 """
         return await gemini_pool.generate_json(prompt, system_instruction, task_name="script")
 
     async def _generate_scene_plan(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         script = payload.get("script", {})
-        system_instruction = "Eres director técnico de Motion Graphics."
+        system_instruction = "Eres director técnico de Motion Graphics (estilo Apple Keynote / código moderno / HUD gaming)."
         prompt = f"""
 Guion:
 {json.dumps(script, ensure_ascii=False, indent=2)}
 
-Devuelve un JSON array de escenas con:
+Devuelve un JSON array de escenas (una por cada escena del guion) con:
 - "scene_id": int
 - "template": "kinetic_text" | "stat_card" | "split_highlight" | "curiosity_reveal"
-- "headline": string
-- "subtitle": string
-- "accent_color": string
+- "badge": string corto tipo etiqueta HUD (ej. "PUNTO 01", "DATO CLAVE", "GTA VI // LORE", "CÓDIGO / PIPELINE")
+- "headline": string impactante (máximo 7 palabras, puede llevar 1 emoji si aporta)
+- "subtitle": string breve (máximo 14 palabras explicativas)
+- "stat_value": string corto numérico o métrico opcional (ej. "4.2x", "1080p", "2026", "$2B") o ""
+- "stat_label": string corto que acompaña a stat_value (ej. "RENDIMIENTO", "PRECISIÓN") o ""
+- "progress_pct": int entre 15 y 98 (barra visual animada en tarjeta o diagrama)
+- "bullets": lista de 0 a 3 líneas muy cortas (ideal para bloques de código, pasos o comparación)
+- "accent_color": hex color brillante acorde al tema (ej. "#00E5FF", "#38BDF8", "#A855F7", "#F59E0B", "#10B981")
 - "animation_type": "slide_up" | "zoom_in" | "glitch_reveal"
 - "duration_sec": float
 """

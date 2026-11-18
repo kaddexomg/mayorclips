@@ -26,6 +26,10 @@ export default function ClipsView({ selectedProject, setTab, onSelectClipForPubl
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingClip, setEditingClip] = useState(null);
   const [editLayout, setEditLayout] = useState("split_screen");
+  const [editContentMode, setEditContentMode] = useState("auto");
+  const [editHookPersistence, setEditHookPersistence] = useState("intro");
+  const [editShowSubtitles, setEditShowSubtitles] = useState(true);
+  const [editVideoTransitions, setEditVideoTransitions] = useState(true);
   const [editSubStyle, setEditSubStyle] = useState("hormozi");
   const [editHook, setEditHook] = useState("");
   const [editEventComment, setEditEventComment] = useState("");
@@ -140,7 +144,11 @@ export default function ClipsView({ selectedProject, setTab, onSelectClipForPubl
 
   const openEditor = (clip) => {
     setEditingClip(clip);
-    setEditLayout(clip.layout || "split_screen");
+    setEditLayout(clip.layout || "auto");
+    setEditContentMode(clip.content_mode || "auto");
+    setEditHookPersistence(clip.hook_persistence || "intro");
+    setEditShowSubtitles(clip.show_subtitles ?? true);
+    setEditVideoTransitions(clip.video_transitions ?? true);
     setEditSubStyle(clip.subtitle_style || "hormozi");
     setEditHook(clip.hook_text || clip.title);
     setEditEventComment(clip.event_comment || "");
@@ -154,6 +162,10 @@ export default function ClipsView({ selectedProject, setTab, onSelectClipForPubl
     try {
       const updated = await api.updateClip(editingClip.id, {
         layout: editLayout,
+        content_mode: editContentMode,
+        hook_persistence: editHookPersistence,
+        show_subtitles: editShowSubtitles,
+        video_transitions: editVideoTransitions,
         subtitle_style: editSubStyle,
         hook_text: editHook,
         event_comment: editEventComment,
@@ -468,6 +480,35 @@ export default function ClipsView({ selectedProject, setTab, onSelectClipForPubl
                 />
               </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="font-mono text-neutral-400 uppercase">Modo de Contenido</label>
+                  <select
+                    value={editContentMode}
+                    onChange={(e) => setEditContentMode(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-abyss border border-white/10 text-white focus:outline-none focus:border-brand"
+                  >
+                    <option value="auto">Auto Inteligente (Pulpo Vision)</option>
+                    <option value="gaming_gta">GTA 6 / Gaming (Enfoque en acción/meme)</option>
+                    <option value="podcast">Podcast / Debate (Seguimiento caras)</option>
+                    <option value="reaction">Reacción / Streamer</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="font-mono text-neutral-400 uppercase">Permanencia Título</label>
+                  <select
+                    value={editHookPersistence}
+                    onChange={(e) => setEditHookPersistence(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-abyss border border-white/10 text-white focus:outline-none focus:border-brand"
+                  >
+                    <option value="intro">Solo Intro (0s - 4.6s)</option>
+                    <option value="always">Todo el Clip (Fijo arriba)</option>
+                    <option value="off">Ocultar Título</option>
+                  </select>
+                </div>
+              </div>
+
               <div className="space-y-1">
                 <label className="font-mono text-neutral-400 uppercase">Layout 9:16</label>
                 <select
@@ -476,6 +517,7 @@ export default function ClipsView({ selectedProject, setTab, onSelectClipForPubl
                   className="w-full px-3 py-2 rounded-lg bg-abyss border border-white/10 text-white focus:outline-none focus:border-brand"
                 >
                   <option value="auto">Auto Inteligente (Detecta hablantes y pantalla)</option>
+                  <option value="gaming_zoom">Enfoque Acción GTA / Gameplay Zoom</option>
                   <option value="duo_split">Dúo Vertical (1 persona arriba / 1 persona abajo)</option>
                   <option value="speaker_focus">Seguimiento al Hablante Activo + Pantalla</option>
                   <option value="split_screen">Webcam Arriba + Juego/Pantalla Abajo</option>
@@ -497,6 +539,27 @@ export default function ClipsView({ selectedProject, setTab, onSelectClipForPubl
                   <option value="mrbeast">MrBeast Pop-Up</option>
                   <option value="minimal">Minimal Blanco</option>
                 </select>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-1">
+                <label className="flex items-center gap-2 text-neutral-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editShowSubtitles}
+                    onChange={(e) => setEditShowSubtitles(e.target.checked)}
+                    className="accent-brand"
+                  />
+                  Mostrar Subtítulos (pausas limpias)
+                </label>
+                <label className="flex items-center gap-2 text-neutral-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editVideoTransitions}
+                    onChange={(e) => setEditVideoTransitions(e.target.checked)}
+                    className="accent-brand"
+                  />
+                  Transiciones Video + Texto
+                </label>
               </div>
             </div>
 

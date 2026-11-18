@@ -20,6 +20,9 @@ dist/
 storage/media/*
 storage/renders/*
 storage/cache/*
+storage/studio_hf/
+.hyperframes/
+**/.hyperframes/
 !storage/media/.gitkeep
 !storage/renders/.gitkeep
 !storage/cache/.gitkeep

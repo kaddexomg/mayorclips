@@ -18,11 +18,28 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.close()
 
 def init_db():
+    from sqlalchemy import text
     from app.models import (
         Project, Transcript, Moment, Clip, StudioVideo,
         Job, SocialAccount, Post, PostTarget, PostMetric, PulpoUsage
     )
     SQLModel.metadata.create_all(engine)
+
+    # Safe SQLite migration for new Clip control columns
+    migrations = [
+        ("clips", "content_mode", "TEXT DEFAULT 'auto'"),
+        ("clips", "hook_persistence", "TEXT DEFAULT 'intro'"),
+        ("clips", "show_subtitles", "BOOLEAN DEFAULT 1"),
+        ("clips", "video_transitions", "BOOLEAN DEFAULT 1"),
+    ]
+    with engine.begin() as conn:
+        for table, col, col_type in migrations:
+            try:
+                cols = [r[1] for r in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()]
+                if col not in cols:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+            except Exception as e:
+                print(f"[DB MIGRATION] Skipped {table}.{col}: {e}")
 
 def get_session():
     with Session(engine) as session:

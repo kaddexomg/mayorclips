@@ -95,6 +95,8 @@ export default function StudioView() {
                 onChange={(e) => setStyle(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-abyss border border-white/10 text-white text-xs focus:outline-none focus:border-brand"
               >
+                <option value="explainer">Explicativo / Código (Motion Graphics)</option>
+                <option value="gaming_lore">GTA 6 / Lore & Memes Gaming</option>
                 <option value="curiosities">Curiosidades</option>
                 <option value="top5">Top 5 Virales</option>
                 <option value="history">Historia / Misterio</option>
@@ -166,7 +168,7 @@ export default function StudioView() {
                 <div className="aspect-[9/16] max-w-xs mx-auto rounded-xl overflow-hidden bg-black border border-brand/30">
                   <video src={`${API_BASE}${generatedVideo.video_url}`} controls className="w-full h-full object-contain" />
                 </div>
-                <div className="text-center">
+                <div className="text-center space-y-2">
                   <a
                     href={`${API_BASE}${generatedVideo.video_url}`}
                     download={`${generatedVideo.title.slice(0, 30)}.mp4`}
@@ -174,6 +176,11 @@ export default function StudioView() {
                   >
                     <Download className="h-3.5 w-3.5" /> Descargar MP4
                   </a>
+                  {generatedVideo.hf_project_dir && (
+                    <div className="text-[11px] font-mono text-neutral-400">
+                      Proyecto HyperFrames editable: <span className="text-brand">{generatedVideo.hf_project_dir}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             )}

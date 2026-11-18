@@ -118,7 +118,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     base_bgr = preset["PrimaryColour"]
 
     if words:
-        # Group into natural 2-3 word rhythmic chunks
+        # Group into natural 2-3 word rhythmic chunks; split immediately on >0.55s silence pauses
         chunks = []
         cur = []
         cur_chars = 0
@@ -126,7 +126,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             wt = (w.get("word") or "").strip()
             if not wt:
                 continue
-            if cur and (len(cur) >= 3 or cur_chars + len(wt) > 20):
+            gap_from_prev = float(w["start_sec"]) - float(cur[-1]["end_sec"]) if cur else 0.0
+            if cur and (len(cur) >= 3 or cur_chars + len(wt) > 20 or gap_from_prev > 0.55):
                 chunks.append(cur)
                 cur = []
                 cur_chars = 0
@@ -135,16 +136,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if cur:
             chunks.append(cur)
 
-        # Emit word-by-word highlight inside each chunk
+        # Emit word-by-word highlight + pop-in transition on chunk start + silence hide
         for c_idx, chunk in enumerate(chunks):
             for w_idx, active_w in enumerate(chunk):
                 w_start = float(active_w["start_sec"])
-                # Extend smoothly to next word or next chunk to prevent flickering gaps
                 if w_idx + 1 < len(chunk):
                     w_end = float(chunk[w_idx + 1]["start_sec"])
                 elif c_idx + 1 < len(chunks):
                     next_s = float(chunks[c_idx + 1][0]["start_sec"])
-                    w_end = min(float(active_w["end_sec"]) + 0.25, next_s)
+                    # Hide subtitle cleanly during silence (>0.45s gap) instead of hanging on screen
+                    if next_s - float(active_w["end_sec"]) > 0.45:
+                        w_end = float(active_w["end_sec"]) + 0.14
+                    else:
+                        w_end = min(float(active_w["end_sec"]) + 0.22, next_s)
                 else:
                     w_end = float(active_w["end_sec"]) + 0.15
 
@@ -155,11 +159,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 for j, item in enumerate(chunk):
                     txt = _esc_ass(item["word"].upper())
                     if j == w_idx:
-                        styled_tokens.append(f"{{\\c{active_bgr}&\\fscx108\\fscy108}}{txt}{{\\c{base_bgr}&\\fscx100\\fscy100}}")
+                        styled_tokens.append(f"{{\\c{active_bgr}&\\fscx110\\fscy110}}{txt}{{\\c{base_bgr}&\\fscx100\\fscy100}}")
                     else:
                         styled_tokens.append(txt)
 
-                line_str = " ".join(styled_tokens)
+                # Pop-bounce entrance transition on the first word of each phrase chunk
+                anim_prefix = "{\\fad(55,35)\\fscx86\\fscy86\\t(0,85,\\fscx107\\fscy107)\\t(85,150,\\fscx100\\fscy100)}" if w_idx == 0 else ""
+                line_str = anim_prefix + " ".join(styled_tokens)
                 events.append(f"Dialogue: 0,{format_ass_time(w_start)},{format_ass_time(w_end)},Default,,0,0,0,,{line_str}")
 
     full_content = header + "\n".join(events) + "\n"
