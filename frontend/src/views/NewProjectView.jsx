@@ -424,9 +424,26 @@ export default function NewProjectView({ setTab, onProjectCreated }) {
                   type="text"
                   value={contextHint}
                   onChange={(e) => setContextHint(e.target.value)}
-                  placeholder="Ej: Roleplay GTA, busca risas, sustos o explicaciones"
+                  placeholder="Ej: Carros, persecuciones GTA, comentarios sobre GTA 6, risas..."
                   className="w-full px-4 py-2.5 rounded-xl bg-abyss border border-white/10 text-white placeholder-neutral-500 text-sm focus:outline-none focus:border-brand font-sans"
                 />
+                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                  {[
+                    "Carros, persecuciones y comentarios de GTA 6",
+                    "Reacciones sorprendentes y momentos graciosos",
+                    "Situaciones inesperadas que den ganas de ver el directo",
+                    "Mundo Streamers (RDjavi, Auron, Rubius, IlloJuan)",
+                  ].map((preset) => (
+                    <button
+                      type="button"
+                      key={preset}
+                      onClick={() => setContextHint(preset)}
+                      className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/5 hover:bg-brand/15 text-neutral-400 hover:text-brand border border-white/10 transition"
+                    >
+                      + {preset}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 

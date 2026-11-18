@@ -32,6 +32,7 @@ export default function AccountsView() {
   const [metaAppSecret, setMetaAppSecret] = useState("");
   const [tiktokKey, setTiktokKey] = useState("");
   const [tiktokSecret, setTiktokSecret] = useState("");
+  const [pexelsKey, setPexelsKey] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [verifyingId, setVerifyingId] = useState(null);
@@ -110,13 +111,15 @@ export default function AccountsView() {
         meta_app_secret: metaAppSecret || undefined,
         tiktok_client_key: tiktokKey || undefined,
         tiktok_client_secret: tiktokSecret || undefined,
+        pexels_api_key: pexelsKey || undefined,
       });
       setOauthStatus(cfg);
       setMetaAppId("");
       setMetaAppSecret("");
       setTiktokKey("");
       setTiktokSecret("");
-      setMsg("Credenciales OAuth guardadas en la bóveda local. Ya puedes usar 'Iniciar Sesión' en 1 clic.");
+      setPexelsKey("");
+      setMsg("Credenciales guardadas en la bóveda local. Ya puedes usar 'Iniciar Sesión' en 1 clic.");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -514,6 +517,22 @@ export default function AccountsView() {
                   </div>
                 )}
               </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-abyss/70 border border-white/5 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-emerald-400">B-Roll Cinematográfico Studio (Opcional · Pexels API Gratis)</span>
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${oauthStatus?.pexels_configured ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" : "text-neutral-400 border-white/10"}`}>
+                  {oauthStatus?.pexels_configured ? "Pexels Conectado" : "Usando Wikimedia + Lottie"}
+                </span>
+              </div>
+              <input
+                type="password"
+                value={pexelsKey}
+                onChange={(e) => setPexelsKey(e.target.value)}
+                placeholder={oauthStatus?.pexels_configured ? "Pexels API Key guardada (opcional cambiar)" : "Pega tu Pexels API Key gratuita para videos stock HD en Studio"}
+                className="w-full px-3 py-2 rounded-lg bg-ink border border-white/10 text-white text-xs font-mono focus:outline-none focus:border-brand"
+              />
             </div>
 
             <button

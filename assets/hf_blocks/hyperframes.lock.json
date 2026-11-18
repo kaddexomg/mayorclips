@@ -1,0 +1,22 @@
+{
+  "assets/hyperframes-logo-white.svg": "f9f942c43b465616c3af2fb8b07daf1cc05a4776903bbb27beb2bb608060e6c7",
+  "compositions/ai-chat-reveal.html": "b4ce0e31242593d8b8d962bd6b9efd0a44aaa62473ad3405c8ed31948540dcfb",
+  "compositions/assets/fonts/BarlowCondensed-Bold.woff2": "75b7b8e878ea0c33be73e888d0d192df09da34af0cf428b69f8c208e0c27e688",
+  "compositions/assets/fonts/BarlowCondensed-ExtraBold.woff2": "2e5732c61470a890aee05ee399f6720664835efab8749dfc87d487e7882ffc44",
+  "compositions/camcorder-hud.html": "00dfb36c8655e0db5e0036f45c4b3d99a74c2272c258ded3c8c32a59cd19a19a",
+  "compositions/cinematic-zoom.html": "fd166bab4f2de159513ad061bf48878f797944c80ede49a11a264394ffedb7bc",
+  "compositions/code-diff.html": "aff96dad92006220181d6d32f6a889ad1779c79bf23337051880884a6130b201",
+  "compositions/components/camera-shake.html": "3f64f5da225acb5b408847fef9c388f889b1bf1e8d85ec95f0f4316839a60db4",
+  "compositions/components/chart-story.html": "d65180b77637521ea98676c9af1d59395f1e70ce0d0d5e1f604d02bee2821310",
+  "compositions/components/code-terminal-run.html": "f00d6259050d2c5cb3a12fd4a43b96159263f7d38462cd6d0f845b2f83ad43b5",
+  "compositions/components/count-up.html": "6b34b9873a243fedb060d23f4eb5cef1b61a5b169ec1ae064030b70b48beea66",
+  "compositions/data-chart.html": "de7c99255100819cc38ed0207a74cfa8736cf31e0dea941e3380430777ae6a5c",
+  "compositions/editorial-flash-overlay.html": "4d8a3edc42b63aa99de52e5e1bbc932a7f6ba1e83d52e003aba27cd5a20fc432",
+  "compositions/flowchart-vertical.html": "66c6604803025359d48af8f43f4fbc0f2832b8be2e8b60a915ca8a8398dd810b",
+  "compositions/lottie-character-walk/assets/mascot.json": "b17f487d93636827be00a53124dca0ddb4d16907c1225670d75cb966f5963b9b",
+  "compositions/lottie-character-walk/lottie-character-walk.html": "8fea4b75590f91f84aa447735ad098036e43ffb8edfc75efd5d14698948d663d",
+  "compositions/lower-third-bild.html": "a0c9896a02108966e7f2ca587af6631ea776bbc53a620bc498ddad1ba08cd772",
+  "compositions/lt-neon-border.html": "c0a744e833341698ef58b0e103ce30b7f5b3068ab9e98b4296e959ac3ae3acb5",
+  "compositions/news-ticker.html": "21dd659b9eade50eef65351164ef9304fc157b90d51d553cc521a7c61d9b9e0e",
+  "TEMPLATE.md": "de62e4f1777f21b203701c2efc82ef347b5a03292844b99bc1b0af788b5cb91b"
+}

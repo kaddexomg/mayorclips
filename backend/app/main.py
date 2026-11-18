@@ -538,6 +538,7 @@ def _get_oauth_creds(session: Session) -> Dict[str, str]:
         "tiktok_client_key": _get_setting(session, "tiktok_client_key", TIKTOK_CLIENT_KEY),
         "tiktok_client_secret": _get_setting(session, "tiktok_client_secret", TIKTOK_CLIENT_SECRET),
         "tiktok_redirect_uri": _resolve_redirect_uri(session, "tiktok"),
+        "pexels_api_key": _get_setting(session, "pexels_api_key", os.getenv("PEXELS_API_KEY", "")),
     }
 
 
@@ -617,6 +618,7 @@ def get_oauth_config_status(session: Session = Depends(get_session)):
         "meta_configured": bool(c["meta_app_id"] and c["meta_app_secret"]),
         "tiktok_configured": bool(c["tiktok_client_key"] and c["tiktok_client_secret"]),
         "google_configured": bool(GOOGLE_CLIENT_ID),
+        "pexels_configured": bool(c["pexels_api_key"]),
         "meta_app_id_hint": f"***{c['meta_app_id'][-4:]}" if len(c["meta_app_id"]) >= 4 else ("Configurado" if c["meta_app_id"] else ""),
         "tiktok_key_hint": f"***{c['tiktok_client_key'][-4:]}" if len(c["tiktok_client_key"]) >= 4 else ("Configurado" if c["tiktok_client_key"] else ""),
         "meta_redirect_uri": c["meta_redirect_uri"],
@@ -633,6 +635,7 @@ class SaveOAuthCredsPayload(BaseModel):
     tiktok_client_key: Optional[str] = None
     tiktok_client_secret: Optional[str] = None
     tiktok_redirect_uri: Optional[str] = None
+    pexels_api_key: Optional[str] = None
 
 
 @app.post("/oauth/credentials")
@@ -644,6 +647,7 @@ def save_oauth_credentials(payload: SaveOAuthCredsPayload, session: Session = De
         "tiktok_client_key": payload.tiktok_client_key,
         "tiktok_client_secret": payload.tiktok_client_secret,
         "tiktok_redirect_uri": payload.tiktok_redirect_uri,
+        "pexels_api_key": payload.pexels_api_key,
     }
     now = datetime.now(timezone.utc)
     for k, val in fields.items():

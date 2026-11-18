@@ -25,6 +25,10 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+echo [0/3] Limpiando procesos previos en puertos 8000 y 5173 (si existen)...
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000,5173 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
+timeout /t 1 /nobreak >nul
+
 echo [1/3] Iniciando Backend FastAPI (El Pulpo IA + Engine FFmpeg)...
 start "MayorClips Backend" cmd /k "cd /d %~dp0 && python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000"
 

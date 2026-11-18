@@ -4,7 +4,7 @@ import { api, API_BASE } from "../api";
 
 export default function StudioView() {
   const [topic, setTopic] = useState("");
-  const [style, setStyle] = useState("curiosities");
+  const [style, setStyle] = useState("drama");
   const [voice, setVoice] = useState("es-MX-DaliaNeural");
   const [loading, setLoading] = useState(false);
   const [rendering, setRendering] = useState(false);
@@ -62,10 +62,10 @@ export default function StudioView() {
           <Sparkles className="h-3 w-3" /> Estudio Motion Graphics por Código
         </div>
         <h1 className="font-display font-bold text-3xl text-white">
-          Videos Faceless con Voz IA y Subtítulos Cinéticos
+          Escenas Animadas con Personajes y Diálogos IA
         </h1>
         <p className="text-neutral-400 text-sm max-w-xl mx-auto">
-          Crea videos virales desde cero: El Pulpo IA escribe el guion, Edge-TTS genera la voz en español y el motor renderiza el MP4 vertical 9:16 con subtítulos sincronizados al milisegundo.
+          Dramatiza cualquier tema o situación con personajes animados, multitudes, objetos en movimiento, voces distintas para cada actor y subtítulos cinéticos sincronizados.
         </p>
       </div>
 
@@ -95,12 +95,12 @@ export default function StudioView() {
                 onChange={(e) => setStyle(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-abyss border border-white/10 text-white text-xs focus:outline-none focus:border-brand"
               >
-                <option value="explainer">Explicativo / Código (Motion Graphics)</option>
-                <option value="gaming_lore">GTA 6 / Lore & Memes Gaming</option>
-                <option value="curiosities">Curiosidades</option>
-                <option value="top5">Top 5 Virales</option>
-                <option value="history">Historia / Misterio</option>
-                <option value="data_charts">Gráficas & Datos</option>
+                <option value="drama">Dramatización con Personajes y Diálogos</option>
+                <option value="history">Historia / Misterio Visual</option>
+                <option value="explainer">Explicativo Animado / Código</option>
+                <option value="gaming_lore">GTA 6 / Acción & Situaciones Gaming</option>
+                <option value="curiosities">Curiosidades Visuales</option>
+                <option value="data_charts">Debate con Balanzas & Datos</option>
               </select>
             </div>
 
@@ -185,17 +185,44 @@ export default function StudioView() {
               </div>
             )}
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-              {generatedVideo.scene_plan_json?.map((sc, i) => (
-                <div key={i} className="p-3 rounded-lg bg-ink/60 border border-white/5 space-y-1">
-                  <div className="flex items-center justify-between text-[11px] font-mono text-neutral-400">
-                    <span>Escena {sc.scene_id || i + 1}</span>
-                    <span className="text-brand">{sc.template || "kinetic_text"}</span>
+            {generatedVideo.script_json?.characters?.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {generatedVideo.script_json.characters.map((ch) => (
+                  <span
+                    key={ch.id}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-ink border border-white/10 text-[11px] font-mono text-neutral-200"
+                  >
+                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: ch.accent_color || "#2BF0C8" }} />
+                    {ch.name} · {ch.archetype}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {generatedVideo.scene_plan_json?.map((sc, i) => {
+                const scriptScene = generatedVideo.script_json?.scenes?.[i] || {};
+                const dlgs = scriptScene.dialogues || [];
+                return (
+                  <div key={i} className="p-3.5 rounded-lg bg-ink/70 border border-white/5 space-y-2">
+                    <div className="flex items-center justify-between text-[11px] font-mono text-neutral-400">
+                      <span>Escena {sc.scene_id || i + 1} · {sc.setting || "plaza"}</span>
+                      <span className="text-brand">{sc.crowd_count > 0 ? `👥 ${sc.crowd_count}` : sc.emotion || "drama"}</span>
+                    </div>
+                    <div className="text-xs text-white font-semibold">{sc.headline || sc.stage_caption}</div>
+                    <div className="text-[11px] text-neutral-400">{sc.subtitle || scriptScene.visual_cue}</div>
+                    {dlgs.length > 0 && (
+                      <div className="space-y-1 pt-1 border-t border-white/5">
+                        {dlgs.map((d, di) => (
+                          <div key={di} className="text-[11px] text-neutral-300">
+                            <span className="text-brand font-mono font-bold">[{d.speaker_id}]:</span> {d.text}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  <div className="text-xs text-white font-medium">{sc.headline || sc.spoken_text}</div>
-                  <div className="text-[11px] text-neutral-400 line-clamp-1">{sc.subtitle || sc.visual_cue}</div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}

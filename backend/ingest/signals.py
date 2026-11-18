@@ -77,3 +77,62 @@ def extract_chat_reactions(chat_entries: List[Dict[str, Any]]) -> List[Dict[str,
                 "intensity": min(100, b["count"] * 10 + b["viral_count"] * 25)
             })
     return spikes
+
+
+def _frame_fractions(count: int) -> List[float]:
+    """Returns normalized positions inside a slice window."""
+    if count <= 1:
+        return [0.50]
+    if count == 2:
+        return [0.25, 0.75]
+    if count == 3:
+        return [0.15, 0.50, 0.82]
+    step = 0.67 / (count - 1)
+    return [round(0.15 + i * step, 4) for i in range(count)]
+
+
+def extract_keyframes_from_stream(
+    stream_url_or_path: str,
+    start_sec: float,
+    duration_sec: float,
+    out_prefix: str,
+    count: int = 3,
+) -> List[str]:
+    """Extracts small keyframes via fast FFmpeg input seek without downloading full media."""
+    if not stream_url_or_path or duration_sec <= 0 or count <= 0:
+        return []
+
+    clean_prefix = str(out_prefix)
+    if clean_prefix.lower().endswith((".jpg", ".jpeg")):
+        clean_prefix = clean_prefix.rsplit(".", 1)[0]
+    Path(clean_prefix).parent.mkdir(parents=True, exist_ok=True)
+
+    base_start = max(0.0, float(start_sec))
+    dur = max(0.5, float(duration_sec))
+    paths: List[str] = []
+
+    for idx, frac in enumerate(_frame_fractions(count)):
+        seek_sec = round(base_start + dur * frac, 2)
+        out_jpg = f"{clean_prefix}_{idx}.jpg"
+        out_file = Path(out_jpg)
+        out_file.unlink(missing_ok=True)
+        cmd = [
+            FFMPEG_PATH,
+            "-y",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-ss", str(seek_sec),
+            "-i", str(stream_url_or_path),
+            "-vf", "scale=640:-2",
+            "-q:v", "6",
+            "-vframes", "1",
+            out_jpg,
+        ]
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+            if proc.returncode == 0 and out_file.exists() and out_file.stat().st_size > 200:
+                paths.append(str(out_file))
+        except Exception as e:
+            print(f"[SIGNALS] Keyframe seek failed at {seek_sec}s: {type(e).__name__}: {e}")
+
+    return paths

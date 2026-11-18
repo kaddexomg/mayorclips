@@ -9,7 +9,13 @@ from sqlmodel import Session, select
 from app.db import engine
 from app.models import Project, Moment, Clip, Transcript
 from app.config import MEDIA_DIR, CACHE_DIR, RENDERS_DIR, FFMPEG_PATH
-from ingest import ingester, analyze_audio_peaks, scan_kick_chat_peaks
+from ingest import (
+    ingester,
+    analyze_audio_peaks,
+    scan_kick_chat_peaks,
+    scan_twitch_chat_peaks,
+    extract_keyframes_from_stream,
+)
 from ingest.live_recorder import live_recorder
 from pulpo import pulpo
 from render import generate_ass_file, render_vertical_clip, extract_frame_jpeg, render_pill_overlay_png
@@ -142,6 +148,26 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
                     "radar_score": p["score"],
                 })
 
+        # 1b. Twitch VOD Chat Burst Radar (~4s for 7-10h Twitch streams!)
+        if not candidate_windows and "twitch" in platform and dur_sec > 180 and url:
+            if progress_callback:
+                progress_callback(22, f"Escaneando chat de Twitch ({dur_sec/3600:.1f}h) para localizar explosiones y memes...")
+            tw_peaks = await scan_twitch_chat_peaks(
+                video_id=url,
+                duration_sec=dur_sec,
+                top_k=7,
+                min_gap_sec=180.0,
+            )
+            for p in tw_peaks:
+                w_start = max(0.0, p["time_sec"] - 55.0)
+                w_dur = min(120.0, max(30.0, dur_sec - w_start))
+                candidate_windows.append({
+                    "start_sec": w_start,
+                    "dur_sec": w_dur,
+                    "chat_sample": f"({p['count']} msgs Twitch en {p['span_sec']}s) {p['sample']}",
+                    "radar_score": p["score"],
+                })
+
         # 2. YouTube Retention Heatmap (0 MB downloaded!)
         if not candidate_windows and heatmap:
             if progress_callback:
@@ -225,11 +251,18 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
             completed_w = 0
             sem = asyncio.Semaphore(2)
             stream_ctx = user_context or info.get("description", "")[:240]
+            video_probe_src = (
+                info.get("hq_muxed_url")
+                or info.get("hq_video_url")
+                or (local_video if source_type in ("file", "live") else None)
+            )
 
             async def _process_one_window(idx: int, win: Dict[str, Any]):
                 nonlocal completed_w
                 h, m = divmod(int(win["start_sec"] // 60), 60)
                 slice_audio = str(CACHE_DIR / f"probe_{project_id[:8]}_{idx}.m4a")
+                win_kf_prefix = str(CACHE_DIR / f"kf_{project_id[:8]}_{idx}")
+                win_frames: List[str] = []
                 async with sem:
                     try:
                         await asyncio.wait_for(
@@ -243,9 +276,26 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
                             ),
                             timeout=85.0,
                         )
+                        if video_probe_src:
+                            try:
+                                win_frames = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        extract_keyframes_from_stream,
+                                        video_probe_src,
+                                        win["start_sec"],
+                                        win["dur_sec"],
+                                        win_kf_prefix,
+                                        3,
+                                    ),
+                                    timeout=45.0,
+                                )
+                            except Exception:
+                                win_frames = []
                         res = await asyncio.wait_for(
                             pulpo.run("analyze_audio_window", {
                                 "audio_path": slice_audio,
+                                "frame_paths": win_frames,
+                                "frame_times": [round(win["dur_sec"] * f, 2) for f in (0.15, 0.50, 0.82)][:len(win_frames)],
                                 "window_start_sec": win["start_sec"],
                                 "window_dur_sec": win["dur_sec"],
                                 "streamer": info.get("streamer", "Streamer"),
@@ -264,12 +314,13 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
                         completed_w += 1
                         pct = 35 + int((completed_w / total_w) * 57)
                         if progress_callback:
-                            progress_callback(pct, f"Analizadas {completed_w}/{total_w} ventanas de audio con El Pulpo IA...")
-                        if Path(slice_audio).exists():
-                            try:
-                                Path(slice_audio).unlink()
-                            except Exception:
-                                pass
+                            progress_callback(pct, f"Analizadas {completed_w}/{total_w} ventanas multimodales con El Pulpo IA...")
+                        for tmp_f in [slice_audio, *win_frames]:
+                            if tmp_f and Path(tmp_f).exists():
+                                try:
+                                    Path(tmp_f).unlink()
+                                except Exception:
+                                    pass
 
             if progress_callback:
                 progress_callback(35, f"Escuchando {total_w} ventanas de contexto en paralelo con El Pulpo IA...")
@@ -450,17 +501,31 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
             )
             temp_slice_created = True
 
-        # 2. Gemini Vision scene classification + OpenCV YuNet active-speaker tracking
+        # 2. Gemini Vision multi-frame beat classification + OpenCV YuNet active-speaker tracking
         if progress_callback:
-            progress_callback(40, "Analizando rostros, acción y seguimiento de cámara...")
+            progress_callback(40, "Analizando rostros, clímax visual y seguimiento de cámara...")
         webcam_box = None
         roi_box = None
+        climax_beat = None
         vision = {}
-        extracted_jpg = await asyncio.to_thread(extract_frame_jpeg, slice_path, frame_jpg, min(2.0, duration / 2))
-        if extracted_jpg:
-            vision = await pulpo.run("detect_facecam", {"image_path": extracted_jpg})
-            webcam_box = vision.get("webcam_box")
-            roi_box = vision.get("roi_box")
+        beat_prefix = str(CACHE_DIR / f"beats_{clip_id[:8]}")
+        beat_frames = await asyncio.to_thread(extract_keyframes_from_stream, slice_path, 0.0, duration, beat_prefix, 3)
+        if beat_frames:
+            beat_times = [round(duration * f, 2) for f in (0.15, 0.50, 0.82)][:len(beat_frames)]
+            vision = await pulpo.run("analyze_clip_beats", {
+                "image_paths": beat_frames,
+                "frame_times": beat_times,
+                "duration_sec": duration,
+                "clip_context": f"{stream_title} | {clip.title} | {event_comment}",
+            })
+        else:
+            extracted_jpg = await asyncio.to_thread(extract_frame_jpeg, slice_path, frame_jpg, min(2.0, duration / 2))
+            if extracted_jpg:
+                vision = await pulpo.run("detect_facecam", {"image_path": extracted_jpg})
+
+        webcam_box = vision.get("webcam_box")
+        roi_box = vision.get("roi_box")
+        climax_beat = vision.get("climax_beat")
 
         track_data = await asyncio.to_thread(analyze_speakers_and_motion, slice_path, 3.0)
         speakers = track_data.get("speakers", [])
@@ -554,6 +619,7 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
             hook_persistence,
             video_transitions,
             roi_box,
+            climax_beat,
         )
 
         with Session(engine) as session:
@@ -586,7 +652,7 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
                 session.commit()
         raise
     finally:
-        for tmp in [frame_jpg, ass_path, hook_png_path, card_png_path]:
+        for tmp in [frame_jpg, ass_path, hook_png_path, card_png_path, *(beat_frames if "beat_frames" in locals() else [])]:
             if tmp and Path(tmp).exists():
                 try:
                     Path(tmp).unlink()
