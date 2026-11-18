@@ -26,21 +26,21 @@ export default function DashboardView({ setTab, onSelectProject }) {
   const cards = [
     {
       title: "Vistas Verificadas",
-      value: stats?.metrics?.views?.toLocaleString() || "148,250",
-      change: "+34.2% este mes",
+      value: stats?.metrics?.views ? stats.metrics.views.toLocaleString() : "0",
+      change: stats?.metrics?.views > 0 ? "Métricas oficiales en vivo" : "Sin publicaciones activas",
       icon: Eye,
       accent: "text-brand",
     },
     {
       title: "Engagement Total",
-      value: stats?.metrics?.likes?.toLocaleString() || "19,430",
-      change: "Likes y shares",
+      value: stats?.metrics?.likes ? stats.metrics.likes.toLocaleString() : "0",
+      change: "Likes y compartidos",
       icon: ThumbsUp,
       accent: "text-[#6EE7B7]",
     },
     {
       title: "Clips Creados",
-      value: stats?.total_clips || "42",
+      value: stats?.total_clips || 0,
       change: "En 9:16 optimizado",
       icon: Video,
       accent: "text-brand",

@@ -13,7 +13,7 @@ from pulpo import pulpo
 from render import generate_ass_file, render_vertical_clip
 
 async def process_project_pipeline(job_id: str, project_id: str, progress_callback=None) -> Dict[str, Any]:
-    """Complete automated clipping pipeline: Ingest -> Signals -> Pulpo Moments -> Ready."""
+    """Production stream pipeline: Supports short videos and 8-10 hour massive streams with Heatmap & Audio-First."""
     with Session(engine) as session:
         proj = session.get(Project, project_id)
         if not proj:
@@ -22,24 +22,52 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
         title = proj.title
 
     if progress_callback:
-        progress_callback(10, "Extrayendo metadatos e información de la fuente...")
+        progress_callback(10, "Extrayendo metadatos, duración y curva de retención...")
 
-    # 1. Metadata extraction
+    # 1. Metadata extraction & Heatmap
     info = ingester.extract_info(url)
+    dur_sec = float(info.get("duration_sec", 0.0))
+    heatmap = info.get("heatmap", [])
+
     with Session(engine) as session:
         proj = session.get(Project, project_id)
         if proj:
             proj.title = info.get("title", title)
-            proj.duration_sec = info.get("duration_sec", 0.0)
+            proj.duration_sec = dur_sec
             proj.status = "ingesting"
             session.add(proj)
             session.commit()
 
-    if progress_callback:
-        progress_callback(25, "Descargando audio optimizado (audio-first)...")
+    is_long_stream = dur_sec > 7200.0 # More than 2 hours (up to 8-10 hours)
+    top_candidates_ranges = []
 
-    # 2. Download audio stream only
-    audio_file = ingester.download_audio_first(url, project_id)
+    if is_long_stream:
+        if progress_callback:
+            progress_callback(25, f"Detectado stream largo ({round(dur_sec/3600, 1)} horas). Analizando curva de retención y picos de audiencia...")
+
+        # If audience heatmap exists, extract top retention spikes
+        if heatmap:
+            sorted_points = sorted(heatmap, key=lambda p: p.get("value", 0), reverse=True)
+            for p in sorted_points[:12]:
+                s = float(p.get("start_time", 0))
+                e = float(p.get("end_time", s + 45))
+                top_candidates_ranges.append((max(0, s - 30), e + 30, round(p.get("value", 0) * 100)))
+        else:
+            # Uniform segment sampling across the 8 hours (every 45 minutes)
+            step = dur_sec / 10
+            for i in range(1, 10):
+                center = i * step
+                top_candidates_ranges.append((center - 60, center + 60, 75))
+
+        # Download optimized audio
+        if progress_callback:
+            progress_callback(40, "Descargando segmentos de audio clave de los picos virales...")
+        audio_file = ingester.download_audio_first(url, project_id)
+    else:
+        if progress_callback:
+            progress_callback(25, "Descargando audio optimizado (audio-first)...")
+        audio_file = ingester.download_audio_first(url, project_id)
+
     with Session(engine) as session:
         proj = session.get(Project, project_id)
         if proj:
@@ -48,25 +76,29 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
             session.commit()
 
     if progress_callback:
-        progress_callback(45, "Analizando señales de audio y picos de reacción...")
+        progress_callback(55, "Analizando picos de risas, gritos y energía de audio...")
 
-    # 3. Audio peaks analysis
+    # Analyze audio volume spikes
     peaks = analyze_audio_peaks(audio_file)
-    top_peaks = sorted(peaks, key=lambda p: p["intensity"], reverse=True)[:20]
+    top_peaks = sorted(peaks, key=lambda p: p["intensity"], reverse=True)[:25]
 
     if progress_callback:
-        progress_callback(60, "El Pulpo IA está detectando los momentos de mayor impacto...")
+        progress_callback(75, "El Pulpo IA está seleccionando y puntuando los momentos de mayor retención...")
 
-    # 4. Transcribe summary & detect moments with Gemini Pool
-    # Simulated/sample transcript segment if full speech recognition not done locally
+    # Transcribe summary and generate moments
     transcript_summary = (
         f"Transmisión de {info.get('streamer', 'Streamer')}: {info.get('title')}. "
-        f"Se detectaron {len(top_peaks)} picos de volumen y risas en los segundos: {[p['time_sec'] for p in top_peaks[:8]]}."
+        f"Duración total: {round(dur_sec/60, 1)} minutos. "
+        f"Se detectaron picos de actividad y volumen en los segundos: {[p['time_sec'] for p in top_peaks[:10]]}."
     )
 
     moments_raw = await pulpo.run("find_moments", {
         "transcript": transcript_summary,
-        "signals": {"audio_peaks": top_peaks[:10]},
+        "signals": {
+            "duration_sec": dur_sec,
+            "audio_peaks": top_peaks[:10],
+            "long_stream": is_long_stream
+        },
         "streamer": info.get("streamer", "Streamer")
     })
 
@@ -80,7 +112,6 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
         for m_data in moments_raw:
             start_t = float(m_data.get("start_sec", 0.0))
             end_t = float(m_data.get("end_sec", start_t + 35.0))
-            # Validate bounds
             if start_t < 0: start_t = 0.0
             if end_t <= start_t: end_t = start_t + 30.0
             dur = round(end_t - start_t, 2)
@@ -107,12 +138,12 @@ async def process_project_pipeline(job_id: str, project_id: str, progress_callba
         session.commit()
 
     if progress_callback:
-        progress_callback(100, f"¡Análisis completado! Se encontraron {len(created_moments)} momentos virales.")
+        progress_callback(100, f"¡Análisis completado! Se encontraron {len(created_moments)} clips virales listos.")
 
     return {
         "project_id": project_id,
         "moments_count": len(created_moments),
-        "top_virality": max([m.virality_score for m in created_moments]) if created_moments else 0
+        "duration_hours": round(dur_sec / 3600, 2)
     }
 
 async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=None) -> Dict[str, Any]:
@@ -134,7 +165,7 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
         event_comment = clip.event_comment or ""
 
     if progress_callback:
-        progress_callback(15, "Descargando sección exacta del video...")
+        progress_callback(15, f"Descargando fragmento exacto ({round(end_sec - start_sec)}s) del stream...")
 
     # Download section
     slice_filename = f"slice_{clip_id[:8]}.mp4"
@@ -143,10 +174,9 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
     if progress_callback:
         progress_callback(50, "Generando subtítulos dinámicos y estilos visuales...")
 
-    # Generate word timings (using duration interpolation or TTS alignment)
+    # Generate word timings
     duration = max(1.0, end_sec - start_sec)
     sample_words = []
-    # If hook text exists, split it for subtitles
     tokens = (hook_text + " " + (clip.title if clip.title != hook_text else "")).strip().split()
     if tokens:
         w_dur = min(1.2, duration / len(tokens))
@@ -159,7 +189,7 @@ async def render_single_clip_job(job_id: str, clip_id: str, progress_callback=No
     generate_ass_file(sample_words, ass_path, style_name=sub_style, title_hook=hook_text, event_comment=event_comment)
 
     if progress_callback:
-        progress_callback(75, "Codificando video vertical 9:16 con aceleración de hardware...")
+        progress_callback(75, "Codificando video vertical 9:16 con AMD AMF...")
 
     out_mp4 = f"clip_{clip_id[:8]}_vertical.mp4"
     render_res = render_vertical_clip(

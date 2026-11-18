@@ -27,12 +27,16 @@ class VideoIngester:
             uploader = info.get("uploader", info.get("channel", "Streamer"))
             thumbnail = info.get("thumbnail", None)
             extractor = info.get("extractor_key", "generic").lower()
+            heatmap = info.get("heatmap") or []
+            chapters = info.get("chapters") or []
             return {
                 "title": title,
                 "duration_sec": duration,
                 "streamer": uploader,
                 "thumbnail": thumbnail,
                 "platform": extractor,
+                "heatmap": heatmap,
+                "chapters": chapters,
                 "url": url
             }
 

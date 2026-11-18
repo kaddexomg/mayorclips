@@ -35,10 +35,10 @@ export default function StatsView() {
             Vistas Totales Auditadas
           </div>
           <div className="font-mono text-4xl font-bold text-brand">
-            {stats?.metrics?.views?.toLocaleString() || "148,250"}
+            {stats?.metrics?.views ? stats.metrics.views.toLocaleString() : "0"}
           </div>
           <div className="text-xs text-neutral-500 flex items-center gap-1.5 pt-1">
-            <span className="text-emerald-400 font-mono font-bold">+18.4%</span> vs semana anterior
+            <span className="text-emerald-400 font-mono font-bold">API Oficial</span> lecturas verificadas
           </div>
         </div>
 
@@ -47,22 +47,22 @@ export default function StatsView() {
             Reacciones & Compartidos
           </div>
           <div className="font-mono text-4xl font-bold text-white">
-            {stats?.metrics?.likes?.toLocaleString() || "19,430"}
+            {stats?.metrics?.likes ? stats.metrics.likes.toLocaleString() : "0"}
           </div>
           <div className="text-xs text-neutral-500 flex items-center gap-1.5 pt-1">
-            <span className="text-emerald-400 font-mono font-bold">13.1%</span> engagement rate
+            <span className="text-emerald-400 font-mono font-bold">0%</span> engagement
           </div>
         </div>
 
         <div className="rounded-2xl bg-ink/60 border border-white/10 p-6 space-y-2">
           <div className="text-xs font-mono text-neutral-400 uppercase tracking-wider">
-            Mejor Horario de Publicación
+            Horario Recomendado
           </div>
-          <div className="font-mono text-4xl font-bold text-[#38BDF8]">
+          <div className="font-mono text-2xl font-bold text-[#38BDF8]">
             19:30 - 21:00
           </div>
           <div className="text-xs text-neutral-500 pt-1">
-            Pico de retención en TikTok e IG Reels
+            Ventana de mayor retención de audiencia
           </div>
         </div>
       </div>
@@ -73,46 +73,52 @@ export default function StatsView() {
           Distribución por Plataforma
         </h3>
         
-        <div className="space-y-4">
-          {/* Instagram */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-xs font-mono">
-              <span className="flex items-center gap-2 text-pink-400">
-                <Instagram className="h-4 w-4" /> Instagram Reels
-              </span>
-              <span className="text-white font-bold">66,712 vistas (45%)</span>
-            </div>
-            <div className="w-full bg-abyss rounded-full h-2.5 overflow-hidden border border-white/5">
-              <div className="bg-gradient-to-r from-pink-500 to-purple-500 h-full rounded-full" style={{ width: "45%" }}></div>
-            </div>
+        {(!stats?.metrics?.views || stats.metrics.views === 0) ? (
+          <div className="py-8 text-center text-xs font-mono text-neutral-500">
+            Aún no hay visualizaciones registradas. Publica tu primer clip en Instagram, Facebook o TikTok para comenzar el monitoreo de métricas.
           </div>
+        ) : (
+          <div className="space-y-4">
+            {/* Instagram */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs font-mono">
+                <span className="flex items-center gap-2 text-pink-400">
+                  <Instagram className="h-4 w-4" /> Instagram Reels
+                </span>
+                <span className="text-white font-bold">{stats?.platforms?.instagram?.views || 0} vistas</span>
+              </div>
+              <div className="w-full bg-abyss rounded-full h-2.5 overflow-hidden border border-white/5">
+                <div className="bg-gradient-to-r from-pink-500 to-purple-500 h-full rounded-full" style={{ width: `${stats?.platforms?.instagram?.views ? 100 : 0}%` }}></div>
+              </div>
+            </div>
 
-          {/* TikTok */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-xs font-mono">
-              <span className="flex items-center gap-2 text-brand">
-                <Video className="h-4 w-4" /> TikTok
-              </span>
-              <span className="text-white font-bold">44,475 vistas (30%)</span>
+            {/* TikTok */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs font-mono">
+                <span className="flex items-center gap-2 text-brand">
+                  <Video className="h-4 w-4" /> TikTok
+                </span>
+                <span className="text-white font-bold">{stats?.platforms?.tiktok?.views || 0} vistas</span>
+              </div>
+              <div className="w-full bg-abyss rounded-full h-2.5 overflow-hidden border border-white/5">
+                <div className="bg-brand h-full rounded-full" style={{ width: `${stats?.platforms?.tiktok?.views ? 100 : 0}%` }}></div>
+              </div>
             </div>
-            <div className="w-full bg-abyss rounded-full h-2.5 overflow-hidden border border-white/5">
-              <div className="bg-brand h-full rounded-full" style={{ width: "30%" }}></div>
-            </div>
-          </div>
 
-          {/* Facebook */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-xs font-mono">
-              <span className="flex items-center gap-2 text-blue-400">
-                <Facebook className="h-4 w-4" /> Facebook Page Reels
-              </span>
-              <span className="text-white font-bold">37,063 vistas (25%)</span>
-            </div>
-            <div className="w-full bg-abyss rounded-full h-2.5 overflow-hidden border border-white/5">
-              <div className="bg-blue-500 h-full rounded-full" style={{ width: "25%" }}></div>
+            {/* Facebook */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs font-mono">
+                <span className="flex items-center gap-2 text-blue-400">
+                  <Facebook className="h-4 w-4" /> Facebook Page Reels
+                </span>
+                <span className="text-white font-bold">{stats?.platforms?.facebook?.views || 0} vistas</span>
+              </div>
+              <div className="w-full bg-abyss rounded-full h-2.5 overflow-hidden border border-white/5">
+                <div className="bg-blue-500 h-full rounded-full" style={{ width: `${stats?.platforms?.facebook?.views ? 100 : 0}%` }}></div>
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
