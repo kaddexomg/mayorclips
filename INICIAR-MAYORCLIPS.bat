@@ -26,13 +26,13 @@ if %errorlevel% neq 0 (
 )
 
 echo [1/3] Iniciando Backend FastAPI (El Pulpo IA + Engine FFmpeg)...
-start /min "MayorClips Backend" cmd /c "cd /d %~dp0 && python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload"
+start "MayorClips Backend" cmd /k "cd /d %~dp0 && python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000"
 
 :: Esperar 2 segundos para inicializar backend
 timeout /t 2 /nobreak >nul
 
 echo [2/3] Iniciando Frontend Quanty Clips (Vite)...
-start /min "MayorClips Frontend" cmd /c "cd /d %~dp0frontend && npm run dev"
+start "MayorClips Frontend" cmd /k "cd /d %~dp0frontend && npm run dev"
 
 timeout /t 2 /nobreak >nul
 
