@@ -1,9 +1,11 @@
 import os
 import sys
 import json
+import html
+import secrets
 import asyncio
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -16,7 +18,7 @@ for p in [str(ROOT_DIR), str(BACKEND_DIR)]:
 
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select, func
@@ -31,7 +33,7 @@ from app.config import (
 from app.db import init_db, get_session, engine
 from app.models import (
     Project, Moment, Clip, StudioVideo, Job,
-    SocialAccount, Post, PostTarget, PostMetric, PulpoUsage, Transcript
+    SocialAccount, Post, PostTarget, PostMetric, PulpoUsage, Transcript, AppSetting
 )
 from app.jobs import (
     enqueue_job, register_ws_client, unregister_ws_client,
@@ -426,7 +428,85 @@ def list_studio_videos(session: Session = Depends(get_session)):
     return [_studio_with_urls(sv) for sv in items]
 
 
-# --- Social Accounts & Real OAuth ---
+# --- Social Accounts & Centralized OAuth Hub ---
+def _get_setting(session: Session, key: str, fallback: str = "") -> str:
+    row = session.get(AppSetting, key)
+    if row and row.value.strip():
+        return row.value.strip()
+    return (fallback or "").strip()
+
+
+def _resolve_redirect_uri(session: Session, platform: str) -> str:
+    default_uri = f"http://127.0.0.1:{BACKEND_PORT}/oauth/{platform}/callback"
+    env_key = "META_REDIRECT_URI" if platform == "meta" else "TIKTOK_REDIRECT_URI"
+    raw = _get_setting(session, env_key.lower(), os.getenv(env_key, ""))
+    if not raw or ".local" in raw:
+        return default_uri
+    return raw
+
+
+def _get_oauth_creds(session: Session) -> Dict[str, str]:
+    return {
+        "meta_app_id": _get_setting(session, "meta_app_id", META_APP_ID),
+        "meta_app_secret": _get_setting(session, "meta_app_secret", META_APP_SECRET),
+        "meta_redirect_uri": _resolve_redirect_uri(session, "meta"),
+        "tiktok_client_key": _get_setting(session, "tiktok_client_key", TIKTOK_CLIENT_KEY),
+        "tiktok_client_secret": _get_setting(session, "tiktok_client_secret", TIKTOK_CLIENT_SECRET),
+        "tiktok_redirect_uri": _resolve_redirect_uri(session, "tiktok"),
+    }
+
+
+def _upsert_social_account(
+    session: Session,
+    platform: str,
+    account_id: str,
+    account_name: str,
+    access_token: str,
+    refresh_token: Optional[str] = None,
+    expires_at: Optional[datetime] = None,
+) -> Dict[str, str]:
+    existing = session.exec(
+        select(SocialAccount).where(SocialAccount.platform == platform, SocialAccount.account_id == account_id)
+    ).first()
+    if existing:
+        existing.access_token_enc = access_token
+        existing.account_name = account_name
+        existing.status = "active"
+        if refresh_token is not None:
+            existing.refresh_token_enc = refresh_token
+        if expires_at is not None:
+            existing.expires_at = expires_at
+        session.add(existing)
+    else:
+        session.add(
+            SocialAccount(
+                platform=platform,
+                account_name=account_name,
+                account_id=account_id,
+                access_token_enc=access_token,
+                refresh_token_enc=refresh_token,
+                expires_at=expires_at,
+                status="active",
+            )
+        )
+    return {"platform": platform, "account_name": account_name, "account_id": account_id}
+
+
+def _oauth_popup_html(ok: bool, platform: str, title: str, detail: str) -> HTMLResponse:
+    color = "#2BF0C8" if ok else "#F87171"
+    payload = json.dumps({"type": "mayorclips_oauth", "platform": platform, "ok": ok, "title": title})
+    return HTMLResponse(
+        content=f"""<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><title>MayorClips OAuth</title>
+<style>body{{background:#060B10;color:#F8FAFC;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}}
+.box{{max-width:440px;padding:32px;border-radius:20px;background:#0C161D;border:1px solid {color}55}}h2{{color:{color};margin:0 0 10px}}p{{color:#CBD5E1;font-size:14px;line-height:1.5}}</style></head>
+<body><div class="box"><h2>{html.escape(title)}</h2><p>{html.escape(detail)}</p></div>
+<script>
+try {{ if (window.opener) window.opener.postMessage({payload}, "*"); }} catch(e) {{}}
+if ({'true' if ok else 'false'}) setTimeout(function(){{ window.close(); }}, 1500);
+</script></body></html>"""
+    )
+
+
 @app.get("/accounts")
 def list_accounts(session: Session = Depends(get_session)):
     accs = session.exec(select(SocialAccount)).all()
@@ -437,6 +517,8 @@ def list_accounts(session: Session = Depends(get_session)):
             "account_name": a.account_name,
             "account_id": a.account_id,
             "status": a.status,
+            "has_refresh": bool(a.refresh_token_enc),
+            "expires_at": a.expires_at,
             "created_at": a.created_at,
         }
         for a in accs
@@ -444,23 +526,65 @@ def list_accounts(session: Session = Depends(get_session)):
 
 
 @app.get("/oauth/config-status")
-def get_oauth_config_status():
+def get_oauth_config_status(session: Session = Depends(get_session)):
+    c = _get_oauth_creds(session)
     return {
-        "meta_configured": bool(META_APP_ID and META_APP_SECRET),
-        "tiktok_configured": bool(TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET),
+        "meta_configured": bool(c["meta_app_id"] and c["meta_app_secret"]),
+        "tiktok_configured": bool(c["tiktok_client_key"] and c["tiktok_client_secret"]),
         "google_configured": bool(GOOGLE_CLIENT_ID),
+        "meta_app_id_hint": f"***{c['meta_app_id'][-4:]}" if len(c["meta_app_id"]) >= 4 else ("Configurado" if c["meta_app_id"] else ""),
+        "tiktok_key_hint": f"***{c['tiktok_client_key'][-4:]}" if len(c["tiktok_client_key"]) >= 4 else ("Configurado" if c["tiktok_client_key"] else ""),
+        "meta_redirect_uri": c["meta_redirect_uri"],
+        "tiktok_redirect_uri": c["tiktok_redirect_uri"],
+        "instagram_direct_upload": True,
         "vps_public_base": os.getenv("VPS_PUBLIC_BASE_URL", ""),
     }
 
 
+class SaveOAuthCredsPayload(BaseModel):
+    meta_app_id: Optional[str] = None
+    meta_app_secret: Optional[str] = None
+    meta_redirect_uri: Optional[str] = None
+    tiktok_client_key: Optional[str] = None
+    tiktok_client_secret: Optional[str] = None
+    tiktok_redirect_uri: Optional[str] = None
+
+
+@app.post("/oauth/credentials")
+def save_oauth_credentials(payload: SaveOAuthCredsPayload, session: Session = Depends(get_session)):
+    fields = {
+        "meta_app_id": payload.meta_app_id,
+        "meta_app_secret": payload.meta_app_secret,
+        "meta_redirect_uri": payload.meta_redirect_uri,
+        "tiktok_client_key": payload.tiktok_client_key,
+        "tiktok_client_secret": payload.tiktok_client_secret,
+        "tiktok_redirect_uri": payload.tiktok_redirect_uri,
+    }
+    now = datetime.now(timezone.utc)
+    for k, val in fields.items():
+        if val is not None and val.strip():
+            row = session.get(AppSetting, k)
+            if row:
+                row.value = val.strip()
+                row.updated_at = now
+                session.add(row)
+            else:
+                session.add(AppSetting(key=k, value=val.strip(), updated_at=now))
+    session.commit()
+    return get_oauth_config_status(session)
+
+
 @app.get("/oauth/meta/start")
-def oauth_meta_start():
-    if not META_APP_ID:
-        raise HTTPException(status_code=400, detail="META_APP_ID no configurado en .env. Usa la verificación directa con Token o configura tu App ID de Meta for Developers.")
-    redirect_uri = os.getenv("META_REDIRECT_URI") or f"http://127.0.0.1:{BACKEND_PORT}/oauth/meta/callback"
+def oauth_meta_start(session: Session = Depends(get_session)):
+    c = _get_oauth_creds(session)
+    if not (c["meta_app_id"] and c["meta_app_secret"]):
+        raise HTTPException(
+            status_code=400,
+            detail="Configura primero Meta App ID y App Secret en la Bóveda de Credenciales o usa Modo Token Directo.",
+        )
     params = urlencode({
-        "client_id": META_APP_ID,
-        "redirect_uri": redirect_uri,
+        "client_id": c["meta_app_id"],
+        "redirect_uri": c["meta_redirect_uri"],
         "scope": "pages_show_list,pages_read_engagement,pages_manage_posts,instagram_basic,instagram_content_publish",
         "response_type": "code",
     })
@@ -468,20 +592,76 @@ def oauth_meta_start():
 
 
 @app.get("/oauth/meta/callback")
-async def oauth_meta_callback(code: str, session: Session = Depends(get_session)):
-    redirect_uri = os.getenv("META_REDIRECT_URI") or f"http://127.0.0.1:{BACKEND_PORT}/oauth/meta/callback"
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        r = await client.get(
-            "https://graph.facebook.com/v21.0/oauth/access_token",
-            params={"client_id": META_APP_ID, "client_secret": META_APP_SECRET, "redirect_uri": redirect_uri, "code": code},
-        )
-        if r.status_code != 200:
-            raise HTTPException(status_code=400, detail=f"Error Meta OAuth: {r.text}")
-        token = r.json().get("access_token")
+async def oauth_meta_callback(code: Optional[str] = None, error: Optional[str] = None, session: Session = Depends(get_session)):
+    if error or not code:
+        return _oauth_popup_html(False, "meta", "Autorización cancelada", error or "No se recibió el código OAuth de Meta.")
+    c = _get_oauth_creds(session)
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(
+                "https://graph.facebook.com/v21.0/oauth/access_token",
+                params={
+                    "client_id": c["meta_app_id"],
+                    "client_secret": c["meta_app_secret"],
+                    "redirect_uri": c["meta_redirect_uri"],
+                    "code": code,
+                },
+            )
+            if r.status_code != 200:
+                raise RuntimeError(r.text)
+            short_token = r.json().get("access_token")
 
-    pages = await meta_publisher.discover_pages_and_ig(token)
-    saved = _save_meta_pages(session, pages)
-    return {"connected": len(saved), "accounts": saved}
+        long_token = await meta_publisher.exchange_long_lived_token(c["meta_app_id"], c["meta_app_secret"], short_token)
+        pages = await meta_publisher.discover_pages_and_ig(long_token)
+        saved = _save_meta_pages(session, pages)
+        if not saved:
+            raise RuntimeError("No se encontraron Páginas de Facebook ni cuentas de Instagram Business vinculadas.")
+        names = ", ".join(f"{a['platform'].upper()}: {a['account_name']}" for a in saved)
+        return _oauth_popup_html(True, "meta", f"¡{len(saved)} cuentas Meta conectadas!", names)
+    except Exception as exc:
+        return _oauth_popup_html(False, "meta", "Error conectando Meta", str(exc))
+
+
+@app.get("/oauth/tiktok/start")
+def oauth_tiktok_start(session: Session = Depends(get_session)):
+    c = _get_oauth_creds(session)
+    if not (c["tiktok_client_key"] and c["tiktok_client_secret"]):
+        raise HTTPException(
+            status_code=400,
+            detail="Configura primero TikTok Client Key y Client Secret en la Bóveda de Credenciales o usa Modo Token Directo.",
+        )
+    params = urlencode({
+        "client_key": c["tiktok_client_key"],
+        "response_type": "code",
+        "scope": "user.info.basic,video.upload",
+        "redirect_uri": c["tiktok_redirect_uri"],
+        "state": secrets.token_urlsafe(12),
+    })
+    return {"auth_url": f"https://www.tiktok.com/v2/auth/authorize/?{params}"}
+
+
+@app.get("/oauth/tiktok/callback")
+async def oauth_tiktok_callback(code: Optional[str] = None, error: Optional[str] = None, session: Session = Depends(get_session)):
+    if error or not code:
+        return _oauth_popup_html(False, "tiktok", "Autorización TikTok cancelada", error or "No se recibió el código OAuth de TikTok.")
+    c = _get_oauth_creds(session)
+    try:
+        tok_data = await tiktok_publisher.exchange_code(
+            c["tiktok_client_key"], c["tiktok_client_secret"], code, c["tiktok_redirect_uri"]
+        )
+        access_token = tok_data["access_token"]
+        refresh_token = tok_data.get("refresh_token")
+        expires_in = int(tok_data.get("expires_in") or 86400)
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+
+        user = await tiktok_publisher.verify_token(access_token)
+        open_id = str(user.get("open_id") or tok_data.get("open_id") or "tiktok_user")
+        name = user.get("display_name") or "Cuenta TikTok"
+        _upsert_social_account(session, "tiktok", open_id, name, access_token, refresh_token=refresh_token, expires_at=expires_at)
+        session.commit()
+        return _oauth_popup_html(True, "tiktok", "¡TikTok conectado!", f"Cuenta {name} lista para publicación 1-Tap.")
+    except Exception as exc:
+        return _oauth_popup_html(False, "tiktok", "Error conectando TikTok", str(exc))
 
 
 def _save_meta_pages(session: Session, pages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -492,30 +672,13 @@ def _save_meta_pages(session: Session, pages: List[Dict[str, Any]]) -> List[Dict
         page_token = p.get("access_token", "")
         if not page_token:
             continue
-
-        existing_fb = session.exec(select(SocialAccount).where(SocialAccount.platform == "facebook", SocialAccount.account_id == page_id)).first()
-        if existing_fb:
-            existing_fb.access_token_enc = page_token
-            existing_fb.account_name = page_name
-            existing_fb.status = "active"
-            session.add(existing_fb)
-        else:
-            session.add(SocialAccount(platform="facebook", account_name=page_name, account_id=page_id, access_token_enc=page_token, status="active"))
-        saved.append({"platform": "facebook", "account_name": page_name, "account_id": page_id})
+        saved.append(_upsert_social_account(session, "facebook", page_id, page_name, page_token))
 
         ig = p.get("instagram_business_account")
         if ig and ig.get("id"):
             ig_id = str(ig["id"])
             ig_user = f"@{ig.get('username', page_name)}"
-            existing_ig = session.exec(select(SocialAccount).where(SocialAccount.platform == "instagram", SocialAccount.account_id == ig_id)).first()
-            if existing_ig:
-                existing_ig.access_token_enc = page_token
-                existing_ig.account_name = ig_user
-                existing_ig.status = "active"
-                session.add(existing_ig)
-            else:
-                session.add(SocialAccount(platform="instagram", account_name=ig_user, account_id=ig_id, access_token_enc=page_token, status="active"))
-            saved.append({"platform": "instagram", "account_name": ig_user, "account_id": ig_id})
+            saved.append(_upsert_social_account(session, "instagram", ig_id, ig_user, page_token))
     session.commit()
     return saved
 
@@ -526,7 +689,11 @@ class VerifyTokenPayload(BaseModel):
 
 @app.post("/accounts/verify-meta")
 async def verify_and_connect_meta(payload: VerifyTokenPayload, session: Session = Depends(get_session)):
-    pages = await meta_publisher.discover_pages_and_ig(payload.access_token.strip())
+    c = _get_oauth_creds(session)
+    token = payload.access_token.strip()
+    if c["meta_app_id"] and c["meta_app_secret"]:
+        token = await meta_publisher.exchange_long_lived_token(c["meta_app_id"], c["meta_app_secret"], token)
+    pages = await meta_publisher.discover_pages_and_ig(token)
     if not pages:
         raise HTTPException(status_code=400, detail="No se encontraron Páginas de Facebook o cuentas de Instagram Business asociadas a este token.")
     saved = _save_meta_pages(session, pages)
@@ -535,19 +702,52 @@ async def verify_and_connect_meta(payload: VerifyTokenPayload, session: Session 
 
 @app.post("/accounts/verify-tiktok")
 async def verify_and_connect_tiktok(payload: VerifyTokenPayload, session: Session = Depends(get_session)):
-    user = await tiktok_publisher.verify_token(payload.access_token.strip())
+    tok = payload.access_token.strip()
+    user = await tiktok_publisher.verify_token(tok)
     open_id = str(user.get("open_id", "tiktok_user"))
     name = user.get("display_name", "Cuenta TikTok")
-    existing = session.exec(select(SocialAccount).where(SocialAccount.platform == "tiktok", SocialAccount.account_id == open_id)).first()
-    if existing:
-        existing.access_token_enc = payload.access_token.strip()
-        existing.account_name = name
-        existing.status = "active"
-        session.add(existing)
-    else:
-        session.add(SocialAccount(platform="tiktok", account_name=name, account_id=open_id, access_token_enc=payload.access_token.strip(), status="active"))
+    acc_info = _upsert_social_account(session, "tiktok", open_id, name, tok)
     session.commit()
-    return {"connected": 1, "accounts": [{"platform": "tiktok", "account_name": name, "account_id": open_id}]}
+    return {"connected": 1, "accounts": [acc_info]}
+
+
+@app.post("/accounts/{account_id}/verify")
+async def verify_existing_account(account_id: str, session: Session = Depends(get_session)):
+    acc = session.get(SocialAccount, account_id)
+    if not acc:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada")
+    try:
+        if acc.platform in ("facebook", "instagram"):
+            info = await meta_publisher.verify_account_token(acc.account_id, acc.access_token_enc)
+            acc.status = "active"
+            session.add(acc)
+            session.commit()
+            return {"ok": True, "platform": acc.platform, "account_name": acc.account_name, "remote_info": info}
+        if acc.platform == "tiktok":
+            try:
+                info = await tiktok_publisher.verify_token(acc.access_token_enc)
+                acc.status = "active"
+                session.add(acc)
+                session.commit()
+                return {"ok": True, "platform": "tiktok", "account_name": acc.account_name, "remote_info": info}
+            except Exception:
+                c = _get_oauth_creds(session)
+                if acc.refresh_token_enc and c["tiktok_client_key"] and c["tiktok_client_secret"]:
+                    ref = await tiktok_publisher.refresh_token(c["tiktok_client_key"], c["tiktok_client_secret"], acc.refresh_token_enc)
+                    acc.access_token_enc = ref["access_token"]
+                    acc.refresh_token_enc = ref.get("refresh_token") or acc.refresh_token_enc
+                    acc.expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(ref.get("expires_in") or 86400))
+                    acc.status = "active"
+                    session.add(acc)
+                    session.commit()
+                    return {"ok": True, "platform": "tiktok", "account_name": acc.account_name, "refreshed": True}
+                raise
+        raise HTTPException(status_code=400, detail=f"Plataforma no soportada: {acc.platform}")
+    except Exception as exc:
+        acc.status = "expired"
+        session.add(acc)
+        session.commit()
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.delete("/accounts/{account_id}")
@@ -614,12 +814,27 @@ async def create_and_publish_post(payload: CreatePostPayload, session: Session =
                     target.remote_post_id = res.get("remote_id")
                     target.published_at = datetime.now(timezone.utc)
                 elif plat == "tiktok":
-                    res = await tiktok_publisher.upload_file_to_inbox(acc.access_token_enc, media_path)
+                    tok = acc.access_token_enc
+                    if acc.expires_at and acc.refresh_token_enc:
+                        exp_utc = acc.expires_at.replace(tzinfo=timezone.utc) if acc.expires_at.tzinfo is None else acc.expires_at
+                        if exp_utc <= datetime.now(timezone.utc):
+                            c = _get_oauth_creds(session)
+                            if c["tiktok_client_key"] and c["tiktok_client_secret"]:
+                                ref = await tiktok_publisher.refresh_token(c["tiktok_client_key"], c["tiktok_client_secret"], acc.refresh_token_enc)
+                                tok = ref["access_token"]
+                                acc.access_token_enc = tok
+                                acc.refresh_token_enc = ref.get("refresh_token") or acc.refresh_token_enc
+                                acc.expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(ref.get("expires_in") or 86400))
+                                session.add(acc)
+                                session.commit()
+                    res = await tiktok_publisher.upload_file_to_inbox(tok, media_path)
                     target.status = "draft_inbox"
                     target.remote_post_id = res.get("remote_id")
                     target.published_at = datetime.now(timezone.utc)
                 elif plat == "instagram":
-                    res = await meta_publisher.publish_instagram_reel(acc.account_id, acc.access_token_enc, video_public_url, payload.caption)
+                    res = await meta_publisher.publish_instagram_reel(
+                        acc.account_id, acc.access_token_enc, video_public_url, payload.caption, video_file_path=media_path
+                    )
                     target.status = "published"
                     target.remote_post_id = res.get("remote_id")
                     target.published_at = datetime.now(timezone.utc)

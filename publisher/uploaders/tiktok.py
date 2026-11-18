@@ -1,20 +1,58 @@
 from pathlib import Path
-import httpx
 from typing import Dict, Any
+import httpx
 
 
 class TikTokPublisher:
-    """Official TikTok Content Posting API integration (Inbox 1-Tap Public via FILE_UPLOAD)."""
+    """Official TikTok Login Kit OAuth v2 & Content Posting API integration (Inbox 1-Tap Public via FILE_UPLOAD)."""
 
+    TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
     INIT_INBOX_URL = "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/"
     USER_INFO_URL = "https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url"
+
+    async def exchange_code(self, client_key: str, client_secret: str, code: str, redirect_uri: str) -> Dict[str, Any]:
+        """Exchanges OAuth authorization code for TikTok access_token + refresh_token."""
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(
+                self.TOKEN_URL,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "client_key": client_key,
+                    "client_secret": client_secret,
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": redirect_uri,
+                },
+            )
+            data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            if r.status_code != 200 or not data.get("access_token"):
+                raise RuntimeError(f"Error TikTok OAuth token: {r.text}")
+            return data
+
+    async def refresh_token(self, client_key: str, client_secret: str, refresh_token_str: str) -> Dict[str, Any]:
+        """Refreshes an expired TikTok access token silently using stored refresh_token."""
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(
+                self.TOKEN_URL,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "client_key": client_key,
+                    "client_secret": client_secret,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token_str,
+                },
+            )
+            data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            if r.status_code != 200 or not data.get("access_token"):
+                raise RuntimeError(f"Error refrescando token TikTok: {r.text}")
+            return data
 
     async def verify_token(self, access_token: str) -> Dict[str, Any]:
         headers = {"Authorization": f"Bearer {access_token}"}
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(self.USER_INFO_URL, headers=headers)
             if r.status_code != 200:
-                raise RuntimeError(f"Token TikTok inválido: {r.text}")
+                raise RuntimeError(f"Token TikTok inválido o expirado: {r.text}")
             return r.json().get("data", {}).get("user", {})
 
     async def upload_file_to_inbox(self, access_token: str, video_file_path: str) -> Dict[str, Any]:

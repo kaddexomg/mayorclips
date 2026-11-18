@@ -21,7 +21,7 @@ def init_db():
     from sqlalchemy import text
     from app.models import (
         Project, Transcript, Moment, Clip, StudioVideo,
-        Job, SocialAccount, Post, PostTarget, PostMetric, PulpoUsage
+        Job, SocialAccount, Post, PostTarget, PostMetric, PulpoUsage, AppSetting
     )
     SQLModel.metadata.create_all(engine)
 

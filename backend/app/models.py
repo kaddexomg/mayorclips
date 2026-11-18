@@ -178,3 +178,11 @@ class PulpoUsage(SQLModel, table=True):
     status_code: int = Field(default=200)
     latency_ms: int = Field(default=0)
     timestamp: datetime = Field(default_factory=utc_now, index=True)
+
+
+class AppSetting(SQLModel, table=True):
+    __tablename__ = "app_settings"
+
+    key: str = Field(primary_key=True)
+    value: str = Field(default="")
+    updated_at: datetime = Field(default_factory=utc_now)

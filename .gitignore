@@ -20,6 +20,7 @@ dist/
 storage/media/*
 storage/renders/*
 storage/cache/*
+storage/logs/
 storage/studio_hf/
 .hyperframes/
 **/.hyperframes/

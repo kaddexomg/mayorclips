@@ -71,10 +71,16 @@ export const api = {
   renderStudioVideo: (id) => fetchApi(`/studio/${id}/render`, { method: "POST" }),
   listStudioVideos: () => fetchApi("/studio"),
 
-  // Accounts & Real OAuth
+  // Accounts & Centralized OAuth
   listAccounts: () => fetchApi("/accounts"),
   getOAuthConfigStatus: () => fetchApi("/oauth/config-status"),
+  saveOAuthCredentials: (data) =>
+    fetchApi("/oauth/credentials", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   getMetaOAuthStart: () => fetchApi("/oauth/meta/start"),
+  getTikTokOAuthStart: () => fetchApi("/oauth/tiktok/start"),
   verifyMetaToken: (accessToken) =>
     fetchApi("/accounts/verify-meta", {
       method: "POST",
@@ -85,6 +91,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ access_token: accessToken }),
     }),
+  verifyExistingAccount: (id) => fetchApi(`/accounts/${id}/verify`, { method: "POST" }),
   deleteAccount: (id) => fetchApi(`/accounts/${id}`, { method: "DELETE" }),
 
   // Posts
