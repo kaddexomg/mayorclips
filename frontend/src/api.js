@@ -50,4 +50,16 @@ export const api = {
   connectAccount: (data) => fetchApi("/accounts", { method: "POST", body: JSON.stringify(data) }),
   createPost: (data) => fetchApi("/posts", { method: "POST", body: JSON.stringify(data) }),
   listPosts: () => fetchApi("/posts"),
+
+  // Higgsfield Cinematic Studio
+  getHiggsfieldStatus: () => fetchApi("/higgsfield/status"),
+  generateCinematicBroll: (prompt, motion, durationSec) => fetchApi("/higgsfield/generate-broll", {
+    method: "POST",
+    body: JSON.stringify({
+      prompt,
+      camera: { motion, speed: 1.0, strength: 0.8 },
+      aspect_ratio: "9:16",
+      duration_sec: durationSec || 4.0
+    })
+  })
 };

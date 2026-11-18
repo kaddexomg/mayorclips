@@ -21,6 +21,7 @@ from app.jobs import enqueue_job, register_ws_client, unregister_ws_client, upda
 from pulpo import pulpo, gemini_pool
 from clipper.pipeline import process_project_pipeline, render_single_clip_job
 from publisher.stats.collector import update_all_metrics_job
+from higgsfield import higgsfield_connector, VideoGenerationRequest
 
 app = FastAPI(
     title="MayorClips API",
@@ -322,6 +323,22 @@ def get_stats_summary(session: Session = Depends(get_session)):
             "tiktok": {"views": int(total_views * 0.30), "active": True}
         }
     }
+
+# --- Higgsfield / Cinematic B-Roll Studio ---
+@app.get("/higgsfield/status")
+def get_higgsfield_status():
+    return {
+        "has_subscription": higgsfield_connector.has_subscription,
+        "mode": "official-mcp" if higgsfield_connector.has_subscription else "open-alternative-cloud",
+        "supported_motions": ["pan_left", "pan_right", "tilt_up", "tilt_down", "zoom_in", "zoom_out", "orbit_3d"]
+    }
+
+@app.post("/higgsfield/generate-broll")
+async def generate_higgsfield_broll(req: VideoGenerationRequest):
+    try:
+        return await higgsfield_connector.generate_cinematic_broll(req)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- WebSocket for Realtime Job Progress ---
 @app.websocket("/ws/jobs")

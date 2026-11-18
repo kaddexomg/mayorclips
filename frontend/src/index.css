@@ -3,13 +3,48 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+    --spring-snappy: cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
   body {
     @apply bg-abyss text-text-main font-sans;
     background-image: 
-      radial-gradient(circle at 50% 0%, rgba(43, 240, 200, 0.08) 0%, transparent 45%),
-      radial-gradient(circle at 100% 50%, rgba(20, 36, 43, 0.6) 0%, transparent 50%);
+      radial-gradient(circle at 50% -10%, rgba(43, 240, 200, 0.12) 0%, transparent 50%),
+      radial-gradient(circle at 90% 20%, rgba(20, 36, 43, 0.7) 0%, transparent 40%),
+      radial-gradient(circle at 10% 80%, rgba(11, 115, 85, 0.15) 0%, transparent 45%);
     background-attachment: fixed;
   }
+}
+
+/* Emil Kowalski & Apple Design Tactile Foundations */
+.btn-tactile {
+  transition: transform 120ms var(--ease-out-expo), filter 120ms ease-out, background-color 150ms ease-out;
+  will-change: transform;
+}
+.btn-tactile:active {
+  transform: scale(0.96);
+}
+
+/* Apple-style Glass Card */
+.glass-panel {
+  background: rgba(20, 36, 43, 0.55);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 
+    0 10px 30px -10px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition: transform 220ms var(--ease-out-expo), border-color 200ms ease-out, box-shadow 220ms var(--ease-out-expo);
+}
+.glass-panel:hover {
+  transform: translateY(-2px);
+  border-color: rgba(43, 240, 200, 0.35);
+  box-shadow: 
+    0 16px 36px -12px rgba(6, 11, 16, 0.8),
+    0 0 20px -5px rgba(43, 240, 200, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 /* Custom modern scrollbar matching Quanty theme */

@@ -3,6 +3,7 @@ import Header from "./components/Header";
 import DashboardView from "./views/DashboardView";
 import NewProjectView from "./views/NewProjectView";
 import ClipsView from "./views/ClipsView";
+import CinemaStudioView from "./views/CinemaStudioView";
 import PublisherView from "./views/PublisherView";
 import StatsView from "./views/StatsView";
 import StudioView from "./views/StudioView";
@@ -51,6 +52,7 @@ export default function App() {
             onSelectClipForPublish={(clip) => setSelectedClipForPublish(clip)}
           />
         )}
+        {currentTab === "cinema" && <CinemaStudioView />}
         {currentTab === "publisher" && (
           <PublisherView selectedClipForPublish={selectedClipForPublish} />
         )}
@@ -60,7 +62,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-white/5 py-5 text-center text-xs font-mono text-neutral-500 bg-abyss/80">
-        MayorClips v1.0.0 · Motor de Clipping con IA y Motion Graphics · Paleta Quanty Clips
+        MayorClips v1.1.0 · Motor de Clipping con IA, Motion Graphics & Cinema Studio (Higgsfield Ready)
       </footer>
     </div>
   );
