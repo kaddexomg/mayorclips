@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MayorClips — Conectando TikTok OAuth...</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #05080f;
+      color: #f8fafc;
+      font-family: system-ui, -apple-system, sans-serif;
+      text-align: center;
+      padding: 24px;
+    }
+    .card {
+      max-width: 480px;
+      padding: 28px;
+      border-radius: 16px;
+      background: #0d1320;
+      border: 1px solid rgba(83, 252, 24, 0.35);
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+    }
+    h1 { font-size: 20px; margin: 0 0 10px; color: #53fc18; }
+    p { font-size: 14px; color: #94a3b8; line-height: 1.5; }
+    a.btn {
+      display: inline-block;
+      margin-top: 16px;
+      padding: 10px 20px;
+      border-radius: 10px;
+      background: #53fc18;
+      color: #05080f;
+      font-weight: 700;
+      text-decoration: none;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Conectando cuenta de TikTok con MayorClips...</h1>
+    <p id="msg">Redirigiendo automáticamente a tu servidor local de MayorClips (127.0.0.1:8000)...</p>
+    <a id="fallbackLink" class="btn" href="http://127.0.0.1:8000/oauth/tiktok/callback">Continuar a MayorClips</a>
+  </div>
+  <script>
+    (function () {
+      var qs = window.location.search || "";
+      var target = "http://127.0.0.1:8000/oauth/tiktok/callback" + qs;
+      var link = document.getElementById("fallbackLink");
+      if (link) link.href = target;
+      if (qs) {
+        window.location.replace(target);
+      } else {
+        document.getElementById("msg").textContent = "Endpoint HTTPS de Callback OAuth para MayorClips activo.";
+      }
+    })();
+  </script>
+</body>
+</html>
